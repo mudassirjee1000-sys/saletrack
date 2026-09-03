@@ -1,0 +1,6 @@
+{
+  "name": "SaleTrack",
+  "description": "Simple, clean, and professional shop management app for sales, stock inventory, expenses, customer credit, and invoicing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
