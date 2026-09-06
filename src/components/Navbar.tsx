@@ -11,7 +11,14 @@ import {
   Sparkles,
   Plus,
   TrendingUp,
+  Building2,
+  Scale,
+  LogOut,
+  LogIn,
+  User as UserIcon,
+  ShieldCheck,
 } from "lucide-react";
+import { useAuth } from "../context/AuthContext.tsx";
 
 export interface NavItem {
   id: ActiveTab;
@@ -28,6 +35,7 @@ interface SidebarProps {
   lowStockCount?: number;
   customerDebtCount?: number;
   onOpenAI?: () => void;
+  onNavigateToAdmin?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -37,6 +45,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   settings,
   lowStockCount = 0,
   customerDebtCount = 0,
+  onNavigateToAdmin,
 }) => {
   const mainNavItems: NavItem[] = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -54,8 +63,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Users,
       badge: customerDebtCount > 0 ? `${customerDebtCount} debt` : undefined,
     },
+    { id: "vendors", label: "Vendors", icon: Building2 },
+    { id: "receivables-payables", label: "Dues & Debts", icon: Scale },
     { id: "reports", label: "Reports", icon: BarChart3 },
     { id: "ai", label: "AI Advisor", icon: Sparkles },
+    { id: "settings", label: "Settings", icon: Settings },
   ];
 
   return (
@@ -105,8 +117,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
         })}
       </nav>
 
-      {/* Settings pinned at bottom */}
-      <div className="p-4 border-t border-slate-100">
+      {/* Settings & Admin pinned at bottom */}
+      <div className="p-4 border-t border-slate-100 space-y-1">
         <button
           id="sidebar-tab-settings"
           onClick={() => setActiveTab("settings")}
@@ -119,6 +131,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <Settings className={`w-5 h-5 ${activeTab === "settings" ? "text-blue-600" : "text-slate-400"}`} />
           <span>Settings</span>
         </button>
+
+        {onNavigateToAdmin && (
+          <button
+            id="sidebar-tab-admin"
+            onClick={onNavigateToAdmin}
+            className="w-full flex items-center justify-between p-3 rounded-lg font-medium text-sm transition-colors text-left text-slate-500 hover:bg-amber-50 hover:text-amber-800"
+          >
+            <div className="flex items-center space-x-3">
+              <ShieldCheck className="w-5 h-5 text-amber-600" />
+              <span>Admin Console</span>
+            </div>
+            <span className="px-1.5 py-0.5 text-2xs font-bold rounded bg-amber-100 text-amber-800">
+              Admin
+            </span>
+          </button>
+        )}
       </div>
     </aside>
   );
@@ -132,6 +160,7 @@ interface HeaderProps {
   onOpenAI?: () => void;
   onNewSale?: () => void;
   lowStockCount?: number;
+  onNavigateToAdmin?: () => void;
 }
 
 
@@ -141,6 +170,8 @@ const TAB_TITLES: Record<ActiveTab, string> = {
   sales: "Sales & Point of Sale",
   expenses: "Operating Expenses",
   customers: "Customer Credit Ledger",
+  vendors: "Vendor Management",
+  "receivables-payables": "Receivables & Payables",
   reports: "Reports & Financials",
   settings: "Shop Settings",
   ai: "AI Business Advisor",
@@ -153,7 +184,9 @@ export const Header: React.FC<HeaderProps> = ({
   settings,
   onOpenAI,
   onNewSale,
+  onNavigateToAdmin,
 }) => {
+  const { user, signInWithGoogle, signOut, loading: authLoading } = useAuth();
   const title = TAB_TITLES[activeTab] || "Overview Dashboard";
 
   const todayFormatted = new Date().toLocaleDateString("en-US", {
@@ -199,6 +232,60 @@ export const Header: React.FC<HeaderProps> = ({
           <Plus className="w-4 h-4" />
           <span>Add Sale</span>
         </button>
+
+        {/* Auth controls */}
+        {user ? (
+          <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
+            {user.user_metadata?.avatar_url || (user as any).photoURL ? (
+              <img
+                src={user.user_metadata?.avatar_url || (user as any).photoURL}
+                alt={user.user_metadata?.full_name || (user as any).displayName || "User"}
+                className="w-7 h-7 rounded-full object-cover border border-slate-200"
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <div className="w-7 h-7 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">
+                {user.user_metadata?.full_name?.[0] || (user as any).displayName?.[0] || user.email?.[0] || "U"}
+              </div>
+            )}
+            <div className="hidden lg:block text-left">
+              <p className="text-xs font-semibold text-slate-800 leading-none truncate max-w-[120px]">
+                {user.user_metadata?.full_name || (user as any).displayName || user.email?.split("@")[0]}
+              </p>
+              <p className="text-[10px] text-slate-500 leading-none truncate max-w-[120px] mt-0.5">
+                {user.email}
+              </p>
+            </div>
+            {onNavigateToAdmin && (
+              <button
+                id="header-admin-btn"
+                onClick={onNavigateToAdmin}
+                title="Open Admin Console"
+                className="p-1.5 text-amber-700 hover:text-amber-800 hover:bg-amber-50 rounded-lg transition-colors border border-amber-200/60"
+              >
+                <ShieldCheck className="w-4 h-4" />
+              </button>
+            )}
+            <button
+              id="header-signout-btn"
+              onClick={signOut}
+              title="Sign Out"
+              className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        ) : (
+          <button
+            id="header-signin-btn"
+            onClick={signInWithGoogle}
+            disabled={authLoading}
+            className="flex items-center space-x-1.5 px-2.5 sm:px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors"
+          >
+            <LogIn className="w-3.5 h-3.5 text-slate-600" />
+            <span className="hidden sm:inline">Sign In</span>
+          </button>
+        )}
 
         {/* Today date indicator */}
         <div className="text-right hidden sm:block pl-2 border-l border-slate-200">

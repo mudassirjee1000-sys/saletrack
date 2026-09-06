@@ -11,6 +11,8 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Filter,
+  Package,
+  RotateCcw,
 } from "lucide-react";
 
 interface ReportsProps {
@@ -43,7 +45,6 @@ export const Reports: React.FC<ReportsProps> = ({
   if (filterType === "today") {
     startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
   } else if (filterType === "week") {
-    // Current week start (Monday)
     const day = now.getDay();
     const diff = now.getDate() - day + (day === 0 ? -6 : 1);
     startDate = new Date(now.getFullYear(), now.getMonth(), diff, 0, 0, 0);
@@ -56,7 +57,6 @@ export const Reports: React.FC<ReportsProps> = ({
 
   // Filter sales within range
   const filteredSales = sales.filter((s) => {
-    // s.date format is YYYY-MM-DD or YYYY-MM-DD HH:mm
     const sDate = new Date(s.date.replace(" ", "T"));
     return !isNaN(sDate.getTime()) && sDate >= startDate && sDate <= endDate;
   });
@@ -67,17 +67,30 @@ export const Reports: React.FC<ReportsProps> = ({
     return !isNaN(eDate.getTime()) && eDate >= startDate && eDate <= endDate;
   });
 
-  // Financial Metrics
-  const totalSalesRevenue = filteredSales.reduce((sum, s) => sum + s.total, 0);
-  const totalGrossProfit = filteredSales.reduce((sum, s) => sum + s.profit, 0);
+  // Financial Metrics with Returns & Refunds accuracy
+  const totalGrossSales = filteredSales.reduce((sum, s) => sum + s.total, 0);
+  const totalRefunds = filteredSales.reduce((sum, s) => sum + (s.refundedAmount || 0), 0);
+  const netSalesRevenue = Math.max(0, totalGrossSales - totalRefunds);
+
+  const totalGrossProfit = filteredSales.reduce((sum, s) => {
+    const refundRatio = s.total > 0 ? (s.refundedAmount || 0) / s.total : 0;
+    return sum + Math.max(0, s.profit - s.profit * refundRatio);
+  }, 0);
+
   const totalExpensesAmount = filteredExpenses.reduce((sum, e) => sum + e.amount, 0);
   const totalNetProfit = totalGrossProfit - totalExpensesAmount;
   const profitMarginPercent =
-    totalSalesRevenue > 0 ? Math.round((totalNetProfit / totalSalesRevenue) * 100) : 0;
+    netSalesRevenue > 0 ? Math.round((totalNetProfit / netSalesRevenue) * 100) : 0;
   const numberOfSales = filteredSales.length;
 
   // Outstanding customer credit (all-time active)
   const totalOutstandingCredit = customers.reduce((sum, c) => sum + c.remaining, 0);
+
+  // Current Inventory Valuation
+  const totalStockUnits = products.reduce((sum, p) => sum + p.stock, 0);
+  const totalStockCost = products.reduce((sum, p) => sum + p.stock * p.purchasePrice, 0);
+  const totalStockRetail = products.reduce((sum, p) => sum + p.stock * p.sellingPrice, 0);
+  const potentialStockProfit = Math.max(0, totalStockRetail - totalStockCost);
 
   // Best-selling products aggregation in this period
   const productPerformanceMap: Record<
@@ -119,10 +132,10 @@ export const Reports: React.FC<ReportsProps> = ({
           <div>
             <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
               <BarChart3 className="w-5 h-5 text-blue-600" />
-              <span>Business Financial Reports</span>
+              <span>Business Financial Reports & Analytics</span>
             </h2>
             <p className="text-xs text-slate-400">
-              Analyze profitability, top products, overheads, and customer credit
+              Clear insight into true net sales, expenses, net profits, and inventory valuation
             </p>
           </div>
 
@@ -173,54 +186,56 @@ export const Reports: React.FC<ReportsProps> = ({
 
       {/* Primary Financial Metric Summary Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        {/* Total Sales */}
+        {/* Net Sales */}
         <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 shadow-xs">
           <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400 block mb-1">
-            Total Sales
+            Net Sales Revenue
           </span>
           <span className="text-xl sm:text-2xl font-bold text-slate-800 block">
             {settings.currency}
-            {totalSalesRevenue.toFixed(2)}
+            {netSalesRevenue.toFixed(2)}
           </span>
           <span className="text-[11px] text-slate-400 mt-1 block">
-            {numberOfSales} transactions recorded
+            {numberOfSales} sales {totalRefunds > 0 ? `(-${settings.currency}${totalRefunds.toFixed(2)} refunds)` : ""}
           </span>
         </div>
 
         {/* Total Expenses */}
         <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 shadow-xs">
           <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400 block mb-1">
-            Total Expenses
+            Operating Expenses
           </span>
-          <span className="text-xl sm:text-2xl font-bold text-red-600 block">
+          <span className="text-xl sm:text-2xl font-bold text-rose-600 block">
             {settings.currency}
             {totalExpensesAmount.toFixed(2)}
           </span>
           <span className="text-[11px] text-slate-400 mt-1 block">
-            {filteredExpenses.length} expense records
+            {filteredExpenses.length} expense entries
           </span>
         </div>
 
         {/* Gross Profit */}
         <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 shadow-xs">
           <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400 block mb-1">
-            Gross Profit (Sales - Cost)
+            Gross Profit (Margin)
           </span>
           <span className="text-xl sm:text-2xl font-bold text-slate-800 block">
             {settings.currency}
             {totalGrossProfit.toFixed(2)}
           </span>
-          <span className="text-[11px] text-green-600 mt-1 block font-medium">Product margin gain</span>
+          <span className="text-[11px] text-emerald-600 mt-1 block font-medium">
+            Product markup after costs
+          </span>
         </div>
 
         {/* Net Profit */}
         <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 shadow-xs">
           <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400 block mb-1">
-            Net Profit (After Expenses)
+            Net Business Profit
           </span>
           <span
             className={`text-xl sm:text-2xl font-bold block ${
-              totalNetProfit >= 0 ? "text-green-600" : "text-red-600"
+              totalNetProfit >= 0 ? "text-emerald-600" : "text-rose-600"
             }`}
           >
             {settings.currency}
@@ -232,133 +247,161 @@ export const Reports: React.FC<ReportsProps> = ({
         </div>
       </div>
 
-      {/* Customer Credit Callout */}
-      <div className="bg-white border border-slate-200 p-4 sm:p-5 rounded-xl shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-slate-50 border border-slate-200 text-slate-700 rounded-lg flex items-center justify-center">
-            <Users className="w-5 h-5 text-blue-600" />
+      {/* Inventory Valuation & Customer Dues Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {/* Inventory Valuation */}
+        <div className="bg-white border border-slate-200 p-4 sm:p-5 rounded-xl shadow-xs space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Package className="w-5 h-5 text-blue-600" />
+              <h3 className="font-bold text-slate-800 text-sm">Inventory Asset Valuation</h3>
+            </div>
+            <span className="text-xs text-slate-400 font-semibold">{totalStockUnits} Units in Stock</span>
           </div>
-          <div>
-            <h4 className="font-bold text-slate-800 text-sm">Outstanding Customer Credit</h4>
-            <p className="text-slate-400">
-              Total uncollected money currently owed by customers on credit sales
-            </p>
+
+          <div className="grid grid-cols-3 gap-2 p-3 bg-slate-50 rounded-lg text-center text-xs">
+            <div>
+              <span className="text-[10px] text-slate-400 block uppercase">Cost Value</span>
+              <span className="font-bold text-slate-700 text-sm">
+                {settings.currency}
+                {totalStockCost.toFixed(2)}
+              </span>
+            </div>
+            <div>
+              <span className="text-[10px] text-slate-400 block uppercase">Retail Value</span>
+              <span className="font-bold text-blue-600 text-sm">
+                {settings.currency}
+                {totalStockRetail.toFixed(2)}
+              </span>
+            </div>
+            <div>
+              <span className="text-[10px] text-slate-400 block uppercase">Unrealized Profit</span>
+              <span className="font-bold text-emerald-600 text-sm">
+                {settings.currency}
+                {potentialStockProfit.toFixed(2)}
+              </span>
+            </div>
           </div>
         </div>
-        <div className="text-left sm:text-right">
-          <span className="text-lg sm:text-xl font-bold text-red-600 block">
-            {settings.currency}
-            {totalOutstandingCredit.toFixed(2)}
-          </span>
-          <span className="text-[11px] text-slate-400 font-medium">
-            Across {customers.filter((c) => c.remaining > 0).length} customer(s)
-          </span>
+
+        {/* Customer Receivables Callout */}
+        <div className="bg-white border border-slate-200 p-4 sm:p-5 rounded-xl shadow-xs space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Users className="w-5 h-5 text-amber-600" />
+              <h3 className="font-bold text-slate-800 text-sm">Active Customer Credit</h3>
+            </div>
+            <span className="text-xs text-rose-600 font-bold">
+              {customers.filter((c) => c.remaining > 0).length} debtors
+            </span>
+          </div>
+
+          <div className="p-3 bg-amber-50/70 border border-amber-200/70 rounded-lg flex items-center justify-between text-xs">
+            <div>
+              <p className="font-semibold text-amber-900">Total Outstanding Receivables</p>
+              <p className="text-[11px] text-amber-700">Money owed to your business by customers</p>
+            </div>
+            <span className="text-lg font-extrabold text-rose-600">
+              {settings.currency}
+              {totalOutstandingCredit.toFixed(2)}
+            </span>
+          </div>
         </div>
       </div>
 
-      {/* Two Column Section: Best Sellers & Expense Breakdown */}
+      {/* Breakdown Grids */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Best Selling Products */}
-        <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
-          <div className="p-4 border-b border-slate-100 flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
-              <Award className="w-4 h-4 text-amber-500" />
-              <span>Best-Selling Products</span>
-            </h3>
-            <span className="text-[11px] text-slate-400 font-medium">Ranked by Volume</span>
-          </div>
-
-          {bestSellingProducts.length === 0 ? (
-            <div className="p-8 text-center text-slate-400 text-xs">
-              No product sales in the selected period.
+        <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-4 sm:p-5 flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-3">
+              <h3 className="font-bold text-slate-800 text-sm flex items-center gap-2">
+                <Award className="w-4 h-4 text-amber-500" />
+                <span>Top Selling Products</span>
+              </h3>
+              <span className="text-[11px] text-slate-400">By Quantity Sold</span>
             </div>
-          ) : (
-            <div className="divide-y divide-slate-100">
-              {bestSellingProducts.map((p, idx) => (
-                <div
-                  key={idx}
-                  className="p-3.5 flex items-center justify-between hover:bg-slate-50 transition text-xs"
-                >
-                  <div className="flex items-center gap-3">
-                    <span
-                      className={`w-6 h-6 rounded-md flex items-center justify-center font-bold text-[11px] ${
-                        idx === 0
-                          ? "bg-amber-100 text-amber-800"
-                          : idx === 1
-                          ? "bg-slate-200 text-slate-700"
-                          : idx === 2
-                          ? "bg-orange-100 text-orange-800"
-                          : "bg-slate-100 text-slate-500"
-                      }`}
-                    >
-                      {idx + 1}
-                    </span>
-                    <div>
-                      <p className="font-bold text-slate-800">{p.name}</p>
-                      <p className="text-[10px] text-slate-400 font-mono">{p.sku}</p>
+
+            {bestSellingProducts.length === 0 ? (
+              <p className="text-xs text-slate-400 italic py-6 text-center">
+                No products sold in this period.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {bestSellingProducts.slice(0, 5).map((p, idx) => (
+                  <div
+                    key={p.sku || idx}
+                    className="flex items-center justify-between p-2.5 rounded-lg bg-slate-50 text-xs"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="w-5 h-5 rounded-full bg-white border border-slate-200 flex items-center justify-center font-bold text-[10px] text-slate-500 shrink-0">
+                        {idx + 1}
+                      </span>
+                      <div className="truncate">
+                        <span className="font-semibold text-slate-800 block truncate">{p.name}</span>
+                        <span className="text-[10px] text-slate-400">SKU: {p.sku}</span>
+                      </div>
                     </div>
-                  </div>
 
-                  <div className="text-right">
-                    <span className="font-semibold text-slate-800 block">
-                      {p.qty} units ({settings.currency}
-                      {p.revenue.toFixed(2)})
-                    </span>
-                    <span className="text-[10px] text-green-600 font-medium">
-                      Profit: +{settings.currency}
-                      {p.profit.toFixed(2)}
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Expense Category Breakdown */}
-        <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
-          <div className="p-4 border-b border-slate-100 flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
-              <Receipt className="w-4 h-4 text-slate-600" />
-              <span>Expense Breakdown</span>
-            </h3>
-            <span className="text-[11px] text-slate-400 font-medium">By Category</span>
-          </div>
-
-          {expenseCategories.length === 0 ? (
-            <div className="p-8 text-center text-slate-400 text-xs">
-              No expenses recorded in the selected period.
-            </div>
-          ) : (
-            <div className="p-4 space-y-3">
-              {expenseCategories.map(([cat, amount]) => {
-                const percent =
-                  totalExpensesAmount > 0
-                    ? Math.round((amount / totalExpensesAmount) * 100)
-                    : 0;
-
-                return (
-                  <div key={cat} className="space-y-1 text-xs">
-                    <div className="flex justify-between font-medium">
-                      <span className="text-slate-700">{cat}</span>
-                      <span className="text-slate-800 font-bold">
-                        {settings.currency}
-                        {amount.toFixed(2)}{" "}
-                        <span className="text-slate-400 text-[10px] font-normal">({percent}%)</span>
+                    <div className="text-right shrink-0">
+                      <span className="font-bold text-slate-800 block">{p.qty} sold</span>
+                      <span className="text-[10px] text-emerald-600 font-semibold">
+                        +{settings.currency}
+                        {p.profit.toFixed(2)} profit
                       </span>
                     </div>
-                    {/* Visual Bar */}
-                    <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-blue-600 rounded-full transition-all duration-300"
-                        style={{ width: `${percent}%` }}
-                      />
-                    </div>
                   </div>
-                );
-              })}
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Expenses by Category */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-4 sm:p-5 flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-3">
+              <h3 className="font-bold text-slate-800 text-sm flex items-center gap-2">
+                <Receipt className="w-4 h-4 text-rose-500" />
+                <span>Expense Breakdown</span>
+              </h3>
+              <span className="text-[11px] text-slate-400">By Category</span>
             </div>
-          )}
+
+            {expenseCategories.length === 0 ? (
+              <p className="text-xs text-slate-400 italic py-6 text-center">
+                No expenses logged in this period.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {expenseCategories.map(([category, amount]) => {
+                  const percentage =
+                    totalExpensesAmount > 0
+                      ? Math.round((amount / totalExpensesAmount) * 100)
+                      : 0;
+
+                  return (
+                    <div key={category} className="p-2.5 rounded-lg bg-slate-50 text-xs space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-slate-700">{category}</span>
+                        <span className="font-bold text-slate-800">
+                          {settings.currency}
+                          {amount.toFixed(2)}{" "}
+                          <span className="text-slate-400 font-normal">({percentage}%)</span>
+                        </span>
+                      </div>
+                      <div className="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-rose-500 rounded-full"
+                          style={{ width: `${percentage}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

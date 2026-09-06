@@ -1,19 +1,33 @@
 import React, { useRef } from "react";
 import { Sale, ShopSettings } from "../types";
-import { Printer, Download, Share2, X, CheckCircle2, Clock } from "lucide-react";
+import {
+  Printer,
+  Download,
+  Share2,
+  X,
+  CheckCircle2,
+  Clock,
+  MessageSquare,
+  RotateCcw,
+} from "lucide-react";
 
 interface InvoiceModalProps {
   sale: Sale | null;
   settings: ShopSettings;
   onClose: () => void;
+  onOpenReturn?: (sale: Sale) => void;
 }
 
-export const InvoiceModal: React.FC<InvoiceModalProps> = ({ sale, settings, onClose }) => {
+export const InvoiceModal: React.FC<InvoiceModalProps> = ({
+  sale,
+  settings,
+  onClose,
+  onOpenReturn,
+}) => {
   const receiptRef = useRef<HTMLDivElement>(null);
   const [copiedNotice, setCopiedNotice] = React.useState(false);
 
   if (!sale) return null;
-
 
   const handlePrint = () => {
     window.print();
@@ -41,14 +55,15 @@ export const InvoiceModal: React.FC<InvoiceModalProps> = ({ sale, settings, onCl
           .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
           .badge-cash { background: #e6f4ea; color: #137333; }
           .badge-credit { background: #fce8e6; color: #c5221f; }
+          .badge-refund { background: #fef3c7; color: #92400e; }
           .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #666; border-top: 1px dashed #ccc; padding-top: 12px; }
         </style>
       </head>
       <body>
         <div class="header">
           <h1 class="title">${settings.shopName}</h1>
-          <p class="sub">${settings.shopAddress}</p>
-          <p class="sub">Tel: ${settings.shopPhone}</p>
+          <p class="sub">${settings.shopAddress || ""}</p>
+          <p class="sub">Tel: ${settings.shopPhone || ""}</p>
         </div>
         <div class="meta">
           <div><strong>Invoice #:</strong> ${sale.invoiceNumber}</div>
@@ -58,6 +73,11 @@ export const InvoiceModal: React.FC<InvoiceModalProps> = ({ sale, settings, onCl
             <span class="badge ${sale.paymentType === "cash" ? "badge-cash" : "badge-credit"}">
               Payment: ${sale.paymentType === "cash" ? "PAID (CASH)" : "UNPAID (CREDIT)"}
             </span>
+            ${
+              (sale.refundedAmount || 0) > 0
+                ? `<span class="badge badge-refund" style="margin-left: 6px;">Refunded: ${settings.currency}${(sale.refundedAmount || 0).toFixed(2)}</span>`
+                : ""
+            }
           </div>
         </div>
         <table>
@@ -96,10 +116,26 @@ export const InvoiceModal: React.FC<InvoiceModalProps> = ({ sale, settings, onCl
               </div>`
             : ""
         }
+        ${
+          (sale.tax || 0) > 0
+            ? `<div style="display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 14px; color: #0284c7;">
+                <span>${sale.taxName || "Tax"} (${sale.taxRate || 0}%):</span>
+                <span>+${settings.currency}${(sale.tax || 0).toFixed(2)}</span>
+              </div>`
+            : ""
+        }
         <div style="display: flex; justify-content: space-between; font-size: 16px; font-weight: bold; border-top: 2px solid #111; padding-top: 8px;">
           <span>Grand Total:</span>
           <span>${settings.currency}${sale.total.toFixed(2)}</span>
         </div>
+        ${
+          (sale.refundedAmount || 0) > 0
+            ? `<div style="display: flex; justify-content: space-between; font-size: 14px; color: #b45309; margin-top: 4px;">
+                <span>Total Refunded:</span>
+                <span>-${settings.currency}${(sale.refundedAmount || 0).toFixed(2)}</span>
+              </div>`
+            : ""
+        }
         <div class="footer">
           <p>${settings.invoiceFooter || "Thank you for shopping with us!"}</p>
           <p style="font-size: 10px; color: #888; margin-top: 6px;">SaleTrack — Sales, Stock & Profit Made Simple</p>
@@ -117,22 +153,44 @@ export const InvoiceModal: React.FC<InvoiceModalProps> = ({ sale, settings, onCl
     URL.revokeObjectURL(url);
   };
 
-  const handleShare = async () => {
+  const getShareText = () => {
     const itemsSummary = sale.items
       .map((i) => `• ${i.productName} x${i.quantity} = ${settings.currency}${i.total.toFixed(2)}`)
       .join("\n");
 
-    const textToShare = `🧾 INVOICE: ${sale.invoiceNumber}
-Shop: ${settings.shopName}
-Date: ${sale.date}
-Customer: ${sale.customerName}
-Status: ${sale.paymentType === "cash" ? "Paid in Cash" : "Credit (Due)"}
+    const refundText = (sale.refundedAmount || 0) > 0
+      ? `\nRefunded Amount: ${settings.currency}${(sale.refundedAmount || 0).toFixed(2)}`
+      : "";
 
-ITEMS:
+    const taxText = (sale.tax || 0) > 0
+      ? `\n${sale.taxName || "Tax"} (${sale.taxRate || 0}%): +${settings.currency}${(sale.tax || 0).toFixed(2)}`
+      : "";
+
+    return `🧾 *INVOICE: ${sale.invoiceNumber}*
+*Store:* ${settings.shopName}
+*Date:* ${sale.date}
+*Customer:* ${sale.customerName}
+*Payment:* ${sale.paymentType === "cash" ? "Paid in Cash" : "Credit (Outstanding Due)"}
+
+*ITEMS:*
 ${itemsSummary}
+${taxText}
+*Total:* ${settings.currency}${sale.total.toFixed(2)}${refundText}
 
-Total: ${settings.currency}${sale.total.toFixed(2)}
-${settings.invoiceFooter}`;
+${settings.invoiceFooter || "Thank you for your business!"}`;
+  };
+
+  const handleShareWhatsApp = () => {
+    const textToShare = getShareText();
+    const cleanPhone = (sale.customerPhone || "").replace(/[^0-9]/g, "");
+    const waUrl = cleanPhone
+      ? `https://wa.me/${cleanPhone}?text=${encodeURIComponent(textToShare)}`
+      : `https://wa.me/?text=${encodeURIComponent(textToShare)}`;
+    window.open(waUrl, "_blank");
+  };
+
+  const handleShare = async () => {
+    const textToShare = getShareText();
 
     if (typeof navigator !== "undefined" && navigator.share) {
       try {
@@ -144,7 +202,6 @@ ${settings.invoiceFooter}`;
         // User cancelled share
       }
     } else if (typeof navigator !== "undefined" && navigator.clipboard) {
-      // Fallback to copying to clipboard
       try {
         await navigator.clipboard.writeText(textToShare);
         setCopiedNotice(true);
@@ -155,19 +212,32 @@ ${settings.invoiceFooter}`;
     }
   };
 
+  const isRefunded = (sale.refundedAmount || 0) >= sale.total;
+  const isPartiallyRefunded = (sale.refundedAmount || 0) > 0 && !isRefunded;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-xs overflow-y-auto">
-      <div className="relative w-full max-w-md rounded-xl bg-white shadow-xl overflow-hidden my-6 border border-slate-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-xs overflow-y-auto">
+      <div className="relative w-full max-w-md rounded-2xl bg-white shadow-2xl overflow-hidden my-6 border border-slate-200">
         {/* Header bar */}
         <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-4 py-3">
-          <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-            Sale Receipt & Invoice
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-600">
+              Receipt & Invoice
+            </span>
+            {isRefunded ? (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700">
+                Refunded
+              </span>
+            ) : isPartiallyRefunded ? (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">
+                Partially Refunded
+              </span>
+            ) : null}
+          </div>
           <button
             id="close-invoice-btn"
             onClick={onClose}
-            className="rounded-md p-1.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700 transition"
+            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700 transition"
             aria-label="Close invoice"
           >
             <X className="h-5 w-5" />
@@ -188,7 +258,7 @@ ${settings.invoiceFooter}`;
           </div>
 
           {/* Invoice Metadata */}
-          <div className="my-4 space-y-1.5 text-xs text-slate-600 bg-slate-50 p-3 rounded-lg border border-slate-200">
+          <div className="my-4 space-y-1.5 text-xs text-slate-600 bg-slate-50 p-3 rounded-xl border border-slate-200">
             <div className="flex justify-between">
               <span className="text-slate-400">Invoice No:</span>
               <span className="font-mono font-bold text-slate-800">{sale.invoiceNumber}</span>
@@ -206,11 +276,11 @@ ${settings.invoiceFooter}`;
             <div className="flex justify-between items-center pt-1 border-t border-slate-200 mt-2">
               <span className="text-slate-400">Payment Status:</span>
               {sale.paymentType === "cash" ? (
-                <span className="inline-flex items-center gap-1 text-green-700 bg-green-100 px-2 py-0.5 rounded-full font-semibold">
+                <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full font-semibold">
                   <CheckCircle2 className="w-3 h-3" /> Paid (Cash)
                 </span>
               ) : (
-                <span className="inline-flex items-center gap-1 text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full font-semibold">
+                <span className="inline-flex items-center gap-1 text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-full font-semibold">
                   <Clock className="w-3 h-3" /> On Credit (Debt)
                 </span>
               )}
@@ -256,11 +326,20 @@ ${settings.invoiceFooter}`;
               </span>
             </div>
             {sale.discount > 0 && (
-              <div className="flex justify-between text-red-600">
+              <div className="flex justify-between text-rose-600">
                 <span>Discount</span>
                 <span>
                   -{settings.currency}
                   {sale.discount.toFixed(2)}
+                </span>
+              </div>
+            )}
+            {(sale.tax || 0) > 0 && (
+              <div className="flex justify-between text-sky-700">
+                <span>{sale.taxName || "Tax"} ({sale.taxRate || 0}%)</span>
+                <span>
+                  +{settings.currency}
+                  {(sale.tax || 0).toFixed(2)}
                 </span>
               </div>
             )}
@@ -271,6 +350,15 @@ ${settings.invoiceFooter}`;
                 {sale.total.toFixed(2)}
               </span>
             </div>
+            {(sale.refundedAmount || 0) > 0 && (
+              <div className="flex justify-between text-amber-800 font-semibold pt-1 border-t border-dashed border-amber-200">
+                <span>Refunded Amount</span>
+                <span>
+                  -{settings.currency}
+                  {(sale.refundedAmount || 0).toFixed(2)}
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Footer note */}
@@ -283,11 +371,11 @@ ${settings.invoiceFooter}`;
         </div>
 
         {/* Action Buttons */}
-        <div className="grid grid-cols-3 gap-2 p-4 bg-slate-50 border-t border-slate-100">
+        <div className="grid grid-cols-4 gap-2 p-3 bg-slate-50 border-t border-slate-100">
           <button
             id="print-invoice-btn"
             onClick={handlePrint}
-            className="flex items-center justify-center gap-1.5 py-2 px-3 bg-white border border-slate-200 text-slate-700 rounded-md font-semibold text-xs hover:bg-slate-100 active:scale-95 transition shadow-xs"
+            className="flex flex-col items-center justify-center gap-1 py-2 px-1 bg-white border border-slate-200 text-slate-700 rounded-xl font-semibold text-[11px] hover:bg-slate-100 active:scale-95 transition shadow-xs"
           >
             <Printer className="w-4 h-4 text-slate-500" />
             <span>Print</span>
@@ -295,33 +383,54 @@ ${settings.invoiceFooter}`;
           <button
             id="download-invoice-btn"
             onClick={handleDownload}
-            className="flex items-center justify-center gap-1.5 py-2 px-3 bg-white border border-slate-200 text-slate-700 rounded-md font-semibold text-xs hover:bg-slate-100 active:scale-95 transition shadow-xs"
+            className="flex flex-col items-center justify-center gap-1 py-2 px-1 bg-white border border-slate-200 text-slate-700 rounded-xl font-semibold text-[11px] hover:bg-slate-100 active:scale-95 transition shadow-xs"
           >
             <Download className="w-4 h-4 text-slate-500" />
-            <span>Save</span>
+            <span>Save HTML</span>
           </button>
           <button
-            id="share-invoice-btn"
-            onClick={handleShare}
-            className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-md font-semibold text-xs active:scale-95 transition shadow-xs text-white ${
-              copiedNotice ? "bg-emerald-600 hover:bg-emerald-700" : "bg-blue-600 hover:bg-blue-700"
-            }`}
+            id="whatsapp-invoice-btn"
+            onClick={handleShareWhatsApp}
+            className="flex flex-col items-center justify-center gap-1 py-2 px-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-semibold text-[11px] active:scale-95 transition shadow-xs"
           >
-            {copiedNotice ? (
-              <>
-                <CheckCircle2 className="w-4 h-4" />
-                <span>Copied!</span>
-              </>
-            ) : (
-              <>
-                <Share2 className="w-4 h-4" />
-                <span>Share</span>
-              </>
-            )}
+            <MessageSquare className="w-4 h-4" />
+            <span>WhatsApp</span>
           </button>
-
+          {onOpenReturn && !isRefunded ? (
+            <button
+              onClick={() => {
+                onClose();
+                onOpenReturn(sale);
+              }}
+              className="flex flex-col items-center justify-center gap-1 py-2 px-1 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-semibold text-[11px] active:scale-95 transition shadow-xs"
+            >
+              <RotateCcw className="w-4 h-4" />
+              <span>Refund</span>
+            </button>
+          ) : (
+            <button
+              id="share-invoice-btn"
+              onClick={handleShare}
+              className={`flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-xl font-semibold text-[11px] active:scale-95 transition shadow-xs text-white ${
+                copiedNotice ? "bg-emerald-700 hover:bg-emerald-800" : "bg-blue-600 hover:bg-blue-700"
+              }`}
+            >
+              {copiedNotice ? (
+                <>
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Copied!</span>
+                </>
+              ) : (
+                <>
+                  <Share2 className="w-4 h-4" />
+                  <span>Copy</span>
+                </>
+              )}
+            </button>
+          )}
         </div>
       </div>
     </div>
   );
 };
+

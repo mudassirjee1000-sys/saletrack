@@ -1,227 +1,64 @@
-import { Product, Sale, Expense, Customer, CustomerPayment, ShopSettings } from "./types";
+import {
+  Product,
+  Sale,
+  SaleReturn,
+  StockMovement,
+  Expense,
+  Customer,
+  Vendor,
+  VendorPurchase,
+  VendorPayment,
+  VendorReturn,
+  ShopSettings,
+} from "./types";
+
+/**
+ * Storage Abstraction
+ * ZERO Demo Data. ZERO Shared Data.
+ * Every new store starts with 100% EMPTY records.
+ */
 
 const STORAGE_KEYS = {
-  PRODUCTS: "small_shop_products_v1",
-  SALES: "small_shop_sales_v1",
-  EXPENSES: "small_shop_expenses_v1",
-  CUSTOMERS: "small_shop_customers_v1",
-  SETTINGS: "small_shop_settings_v1",
-  INITIALIZED: "small_shop_initialized_v1",
+  PRODUCTS: "saletrack_products",
+  SALES: "saletrack_sales",
+  SALE_RETURNS: "saletrack_sale_returns",
+  STOCK_MOVEMENTS: "saletrack_stock_movements",
+  EXPENSES: "saletrack_expenses",
+  CUSTOMERS: "saletrack_customers",
+  VENDORS: "saletrack_vendors",
+  VENDOR_PURCHASES: "saletrack_vendor_purchases",
+  VENDOR_PAYMENTS: "saletrack_vendor_payments",
+  VENDOR_RETURNS: "saletrack_vendor_returns",
+  SETTINGS: "saletrack_settings",
 };
 
 export const DEFAULT_SETTINGS: ShopSettings = {
-  shopName: "SaleTrack Store",
-  shopPhone: "+1 (555) 234-5678",
-  shopAddress: "Main Street, Market Block A-12",
+  shopName: "My Store",
+  shopPhone: "",
+  shopAddress: "",
   currency: "$",
   currencyCode: "USD",
   currencyName: "US Dollar",
   allowNegativeStock: false,
-  invoiceFooter: "SaleTrack — Sales, Stock & Profit Made Simple. Thank you for your business!",
+  invoiceFooter: "Thank you for your business!",
+  taxEnabled: false,
+  taxName: "Tax",
+  taxRate: 0,
+  receiptType: "thermal",
 };
 
-const INITIAL_PRODUCTS: Product[] = [
-  {
-    id: "prod-1",
-    name: "Fresh Whole Milk (1L)",
-    sku: "PRD-001",
-    purchasePrice: 1.5,
-    sellingPrice: 2.2,
-    stock: 24,
-    minStock: 8,
-    category: "Dairy & Beverages",
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: "prod-2",
-    name: "Golden Grain Rice (5kg)",
-    sku: "PRD-002",
-    purchasePrice: 6.0,
-    sellingPrice: 8.5,
-    stock: 14,
-    minStock: 5,
-    category: "Grains & Staples",
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: "prod-3",
-    name: "Farm Fresh Eggs (Crate of 30)",
-    sku: "PRD-003",
-    purchasePrice: 3.8,
-    sellingPrice: 5.2,
-    stock: 4, // low stock trigger
-    minStock: 6,
-    category: "Groceries",
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: "prod-4",
-    name: "Refined Sunflower Oil (1L)",
-    sku: "PRD-004",
-    purchasePrice: 2.8,
-    sellingPrice: 3.9,
-    stock: 3, // low stock trigger
-    minStock: 5,
-    category: "Groceries",
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: "prod-5",
-    name: "Laundry Soap Bar (400g)",
-    sku: "PRD-005",
-    purchasePrice: 0.7,
-    sellingPrice: 1.2,
-    stock: 35,
-    minStock: 10,
-    category: "Household",
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: "prod-6",
-    name: "Whole Wheat Bread (800g)",
-    sku: "PRD-006",
-    purchasePrice: 1.1,
-    sellingPrice: 1.8,
-    stock: 18,
-    minStock: 5,
-    category: "Bakery",
-    createdAt: new Date().toISOString(),
-  },
-];
-
-const INITIAL_CUSTOMERS: Customer[] = [
-  {
-    id: "cust-1",
-    name: "Ahmed Khan",
-    phone: "555-0144",
-    address: "Apartment 3B, Green Residency",
-    totalCredit: 45.0,
-    totalPaid: 20.0,
-    remaining: 25.0,
-    payments: [
-      {
-        id: "pay-1",
-        customerId: "cust-1",
-        amount: 20.0,
-        date: new Date(Date.now() - 86400000 * 2).toISOString().slice(0, 10),
-        note: "Partial cash payment",
-      },
-    ],
-    createdAt: new Date(Date.now() - 86400000 * 5).toISOString(),
-  },
-  {
-    id: "cust-2",
-    name: "Sarah Jenkins",
-    phone: "555-0891",
-    address: "House 14, East Lane",
-    totalCredit: 15.0,
-    totalPaid: 0.0,
-    remaining: 15.0,
-    payments: [],
-    createdAt: new Date(Date.now() - 86400000 * 3).toISOString(),
-  },
-];
-
-const todayDateStr = new Date().toISOString().slice(0, 10);
-
-const INITIAL_SALES: Sale[] = [
-  {
-    id: "sale-1",
-    invoiceNumber: `INV-${todayDateStr.replace(/-/g, "")}-001`,
-    date: `${todayDateStr} 09:30`,
-    customerId: undefined,
-    customerName: "Walk-in Customer",
-    paymentType: "cash",
-    items: [
-      {
-        productId: "prod-1",
-        productName: "Fresh Whole Milk (1L)",
-        sku: "PRD-001",
-        purchasePrice: 1.5,
-        sellingPrice: 2.2,
-        quantity: 2,
-        total: 4.4,
-        profit: 1.4,
-      },
-      {
-        productId: "prod-6",
-        productName: "Whole Wheat Bread (800g)",
-        sku: "PRD-006",
-        purchasePrice: 1.1,
-        sellingPrice: 1.8,
-        quantity: 1,
-        total: 1.8,
-        profit: 0.7,
-      },
-    ],
-    subtotal: 6.2,
-    discount: 0,
-    total: 6.2,
-    profit: 2.1,
-    paid: 6.2,
-  },
-  {
-    id: "sale-2",
-    invoiceNumber: `INV-${todayDateStr.replace(/-/g, "")}-002`,
-    date: `${todayDateStr} 11:15`,
-    customerId: "cust-1",
-    customerName: "Ahmed Khan",
-    customerPhone: "555-0144",
-    paymentType: "credit",
-    items: [
-      {
-        productId: "prod-2",
-        productName: "Golden Grain Rice (5kg)",
-        sku: "PRD-002",
-        purchasePrice: 6.0,
-        sellingPrice: 8.5,
-        quantity: 2,
-        total: 17.0,
-        profit: 5.0,
-      },
-    ],
-    subtotal: 17.0,
-    discount: 0,
-    total: 17.0,
-    profit: 5.0,
-    paid: 0,
-  },
-];
-
-const INITIAL_EXPENSES: Expense[] = [
-  {
-    id: "exp-1",
-    name: "Shop Electricity Bill (August)",
-    category: "Electricity",
-    amount: 18.5,
-    date: todayDateStr,
-    note: "Paid via mobile cash",
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: "exp-2",
-    name: "Cardboard Packaging & Carry Bags",
-    category: "Packaging",
-    amount: 7.0,
-    date: todayDateStr,
-    note: "50 brown bags for grocery",
-    createdAt: new Date().toISOString(),
-  },
-];
-
-// In-memory storage fallback for sandboxed iframes and privacy-restricted environments
+// In-memory fallback
 const memoryStorage: Record<string, string> = {};
 
 function safeGetItem(key: string): string | null {
   try {
     if (typeof window !== "undefined" && window.localStorage) {
-      const val = window.localStorage.getItem(key);
-      if (val !== null) return val;
+      return window.localStorage.getItem(key);
     }
-  } catch (err) {
-    console.warn("localStorage read blocked or unavailable, using in-memory store:", err);
+  } catch {
+    // fallback
   }
-  return memoryStorage[key] ?? null;
+  return memoryStorage[key] || null;
 }
 
 function safeSetItem(key: string, value: string): void {
@@ -230,35 +67,59 @@ function safeSetItem(key: string, value: string): void {
     if (typeof window !== "undefined" && window.localStorage) {
       window.localStorage.setItem(key, value);
     }
-  } catch (err) {
-    console.warn("localStorage write blocked or quota exceeded, cached in memory:", err);
+  } catch {
+    // fallback
   }
 }
 
-// Initialize Storage if empty
-export function initStorage(): void {
-  const initialized = safeGetItem(STORAGE_KEYS.INITIALIZED);
-  if (!initialized) {
-    safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(INITIAL_PRODUCTS));
-    safeSetItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(INITIAL_CUSTOMERS));
-    safeSetItem(STORAGE_KEYS.SALES, JSON.stringify(INITIAL_SALES));
-    safeSetItem(STORAGE_KEYS.EXPENSES, JSON.stringify(INITIAL_EXPENSES));
-    safeSetItem(STORAGE_KEYS.SETTINGS, JSON.stringify(DEFAULT_SETTINGS));
-    safeSetItem(STORAGE_KEYS.INITIALIZED, "true");
+function safeRemoveItem(key: string): void {
+  delete memoryStorage[key];
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // fallback
   }
 }
 
-// Products
+/**
+ * Completely purge all local data on logout.
+ * Guarantees no lingering customer data remains in the browser.
+ */
+export function clearAllLocalData(): void {
+  Object.values(STORAGE_KEYS).forEach((key) => {
+    safeRemoveItem(key);
+  });
+  // Also clean old version keys if any exist in user's browser
+  const legacyKeys = [
+    "small_shop_products_v1",
+    "small_shop_sales_v1",
+    "small_shop_expenses_v1",
+    "small_shop_customers_v1",
+    "small_shop_vendors_v1",
+    "small_shop_vendor_purchases_v1",
+    "small_shop_vendor_payments_v1",
+    "small_shop_settings_v1",
+    "small_shop_initialized_v1",
+  ];
+  legacyKeys.forEach((k) => safeRemoveItem(k));
+}
+
+// Products (Default: EMPTY)
 export function getProducts(): Product[] {
   try {
-    initStorage();
     const data = safeGetItem(STORAGE_KEYS.PRODUCTS);
-    if (!data) return INITIAL_PRODUCTS;
+    if (!data) return [];
     const parsed = JSON.parse(data);
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : INITIAL_PRODUCTS;
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return INITIAL_PRODUCTS;
+    return [];
   }
+}
+
+export function saveProducts(products: Product[]): void {
+  safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
 }
 
 export function saveProduct(product: Product): Product[] {
@@ -269,112 +130,82 @@ export function saveProduct(product: Product): Product[] {
   } else {
     products.unshift(product);
   }
-  safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
+  saveProducts(products);
   return products;
 }
 
-export function deleteProduct(productId: string): Product[] {
-  const products = getProducts().filter((p) => p.id !== productId);
-  safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
+export function deleteProduct(id: string): Product[] {
+  const products = getProducts().filter((p) => p.id !== id);
+  saveProducts(products);
   return products;
 }
 
-export function updateStock(productId: string, quantityChange: number): Product | null {
-  const products = getProducts();
-  const index = products.findIndex((p) => p.id === productId);
-  if (index >= 0) {
-    products[index].stock = Math.max(0, products[index].stock + quantityChange);
-    safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
-    return products[index];
-  }
-  return null;
-}
-
-// Sales
+// Sales (Default: EMPTY)
 export function getSales(): Sale[] {
   try {
-    initStorage();
     const data = safeGetItem(STORAGE_KEYS.SALES);
-    if (!data) return INITIAL_SALES;
+    if (!data) return [];
     const parsed = JSON.parse(data);
-    return Array.isArray(parsed) ? parsed : INITIAL_SALES;
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return INITIAL_SALES;
+    return [];
   }
 }
 
-export function recordSale(sale: Sale): { sales: Sale[]; products: Product[]; customers: Customer[] } {
-  // 1. Add sale to history
+export function saveSales(sales: Sale[]): void {
+  safeSetItem(STORAGE_KEYS.SALES, JSON.stringify(sales));
+}
+
+export function saveSale(sale: Sale): Sale[] {
   const sales = getSales();
   sales.unshift(sale);
-  safeSetItem(STORAGE_KEYS.SALES, JSON.stringify(sales));
-
-  // 2. Reduce product inventory for each item
-  const products = getProducts();
-  (sale.items || []).forEach((item) => {
-    const pIndex = products.findIndex((p) => p.id === item.productId);
-    if (pIndex >= 0) {
-      products[pIndex].stock = Math.max(0, products[pIndex].stock - item.quantity);
-    }
-  });
-  safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
-
-  // 3. If credit, increase customer outstanding balance
-  const customers = getCustomers();
-  if (sale.paymentType === "credit" && sale.customerId) {
-    const cIndex = customers.findIndex((c) => c.id === sale.customerId);
-    if (cIndex >= 0) {
-      customers[cIndex].totalCredit += sale.total;
-      customers[cIndex].remaining += sale.total;
-      safeSetItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(customers));
-    }
-  }
-
-  return { sales, products, customers };
+  saveSales(sales);
+  return sales;
 }
 
-// Expenses
+// Expenses (Default: EMPTY)
 export function getExpenses(): Expense[] {
   try {
-    initStorage();
     const data = safeGetItem(STORAGE_KEYS.EXPENSES);
-    if (!data) return INITIAL_EXPENSES;
+    if (!data) return [];
     const parsed = JSON.parse(data);
-    return Array.isArray(parsed) ? parsed : INITIAL_EXPENSES;
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return INITIAL_EXPENSES;
+    return [];
   }
+}
+
+export function saveExpenses(expenses: Expense[]): void {
+  safeSetItem(STORAGE_KEYS.EXPENSES, JSON.stringify(expenses));
 }
 
 export function saveExpense(expense: Expense): Expense[] {
   const expenses = getExpenses();
-  const index = expenses.findIndex((e) => e.id === expense.id);
-  if (index >= 0) {
-    expenses[index] = expense;
-  } else {
-    expenses.unshift(expense);
-  }
-  safeSetItem(STORAGE_KEYS.EXPENSES, JSON.stringify(expenses));
+  expenses.unshift(expense);
+  saveExpenses(expenses);
   return expenses;
 }
 
-export function deleteExpense(expenseId: string): Expense[] {
-  const expenses = getExpenses().filter((e) => e.id !== expenseId);
-  safeSetItem(STORAGE_KEYS.EXPENSES, JSON.stringify(expenses));
+export function deleteExpense(id: string): Expense[] {
+  const expenses = getExpenses().filter((e) => e.id !== id);
+  saveExpenses(expenses);
   return expenses;
 }
 
-// Customers & Payments
+// Customers (Default: EMPTY)
 export function getCustomers(): Customer[] {
   try {
-    initStorage();
     const data = safeGetItem(STORAGE_KEYS.CUSTOMERS);
-    if (!data) return INITIAL_CUSTOMERS;
+    if (!data) return [];
     const parsed = JSON.parse(data);
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : INITIAL_CUSTOMERS;
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return INITIAL_CUSTOMERS;
+    return [];
   }
+}
+
+export function saveCustomers(customers: Customer[]): void {
+  safeSetItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(customers));
 }
 
 export function saveCustomer(customer: Customer): Customer[] {
@@ -385,118 +216,194 @@ export function saveCustomer(customer: Customer): Customer[] {
   } else {
     customers.unshift(customer);
   }
-  safeSetItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(customers));
+  saveCustomers(customers);
   return customers;
 }
 
-export function recordCustomerPayment(
-  customerId: string,
-  amount: number,
-  date: string,
-  note?: string
-): Customer[] {
-  const customers = getCustomers();
-  const index = customers.findIndex((c) => c.id === customerId);
-  if (index >= 0) {
-    const customer = customers[index];
-    const newPayment: CustomerPayment = {
-      id: "pay-" + Date.now(),
-      customerId,
-      amount,
-      date,
-      note,
-    };
-    customer.payments = customer.payments || [];
-    customer.payments.unshift(newPayment);
-    customer.totalPaid = (customer.totalPaid || 0) + amount;
-    customer.remaining = Math.max(0, customer.totalCredit - customer.totalPaid);
-
-    safeSetItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(customers));
+// Vendors (Default: EMPTY)
+export function getVendors(): Vendor[] {
+  try {
+    const data = safeGetItem(STORAGE_KEYS.VENDORS);
+    if (!data) return [];
+    const parsed = JSON.parse(data);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
   }
-  return customers;
+}
+
+export function saveVendors(vendors: Vendor[]): void {
+  safeSetItem(STORAGE_KEYS.VENDORS, JSON.stringify(vendors));
+}
+
+export function saveVendor(vendor: Vendor): Vendor[] {
+  const vendors = getVendors();
+  const index = vendors.findIndex((v) => v.id === vendor.id);
+  if (index >= 0) {
+    vendors[index] = vendor;
+  } else {
+    vendors.unshift(vendor);
+  }
+  saveVendors(vendors);
+  return vendors;
+}
+
+// Vendor Purchases (Default: EMPTY)
+export function getVendorPurchases(): VendorPurchase[] {
+  try {
+    const data = safeGetItem(STORAGE_KEYS.VENDOR_PURCHASES);
+    if (!data) return [];
+    const parsed = JSON.parse(data);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveVendorPurchases(purchases: VendorPurchase[]): void {
+  safeSetItem(STORAGE_KEYS.VENDOR_PURCHASES, JSON.stringify(purchases));
+}
+
+// Vendor Payments (Default: EMPTY)
+export function getVendorPayments(): VendorPayment[] {
+  try {
+    const data = safeGetItem(STORAGE_KEYS.VENDOR_PAYMENTS);
+    if (!data) return [];
+    const parsed = JSON.parse(data);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveVendorPayments(payments: VendorPayment[]): void {
+  safeSetItem(STORAGE_KEYS.VENDOR_PAYMENTS, JSON.stringify(payments));
+}
+
+// Sale Returns
+export function getSaleReturns(): SaleReturn[] {
+  try {
+    const data = safeGetItem(STORAGE_KEYS.SALE_RETURNS);
+    if (!data) return [];
+    const parsed = JSON.parse(data);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveSaleReturns(returns: SaleReturn[]): void {
+  safeSetItem(STORAGE_KEYS.SALE_RETURNS, JSON.stringify(returns));
+}
+
+export function saveSaleReturn(ret: SaleReturn): SaleReturn[] {
+  const list = getSaleReturns();
+  list.unshift(ret);
+  saveSaleReturns(list);
+  return list;
+}
+
+// Stock Movements
+export function getStockMovements(): StockMovement[] {
+  try {
+    const data = safeGetItem(STORAGE_KEYS.STOCK_MOVEMENTS);
+    if (!data) return [];
+    const parsed = JSON.parse(data);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveStockMovements(movements: StockMovement[]): void {
+  safeSetItem(STORAGE_KEYS.STOCK_MOVEMENTS, JSON.stringify(movements));
+}
+
+export function saveStockMovement(mov: StockMovement): StockMovement[] {
+  const list = getStockMovements();
+  list.unshift(mov);
+  saveStockMovements(list);
+  return list;
+}
+
+// Vendor Returns
+export function getVendorReturns(): VendorReturn[] {
+  try {
+    const data = safeGetItem(STORAGE_KEYS.VENDOR_RETURNS);
+    if (!data) return [];
+    const parsed = JSON.parse(data);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveVendorReturns(returns: VendorReturn[]): void {
+  safeSetItem(STORAGE_KEYS.VENDOR_RETURNS, JSON.stringify(returns));
+}
+
+export function saveVendorReturn(ret: VendorReturn): VendorReturn[] {
+  const list = getVendorReturns();
+  list.unshift(ret);
+  saveVendorReturns(list);
+  return list;
 }
 
 // Settings
 export function getSettings(): ShopSettings {
   try {
-    initStorage();
     const data = safeGetItem(STORAGE_KEYS.SETTINGS);
-    return data ? { ...DEFAULT_SETTINGS, ...JSON.parse(data) } : DEFAULT_SETTINGS;
+    if (!data) return DEFAULT_SETTINGS;
+    return { ...DEFAULT_SETTINGS, ...JSON.parse(data) };
   } catch {
     return DEFAULT_SETTINGS;
   }
 }
 
-export function saveSettings(settings: ShopSettings): ShopSettings {
+export function saveSettings(settings: ShopSettings): void {
   safeSetItem(STORAGE_KEYS.SETTINGS, JSON.stringify(settings));
-  return settings;
 }
 
-// Backup / Restore
-export function exportAllData(): string {
+// Export / Import
+export function exportAllDataJSON(): string {
   const data = {
-    version: 1,
-    exportedAt: new Date().toISOString(),
+    version: "2.1",
+    exportDate: new Date().toISOString(),
     products: getProducts(),
     sales: getSales(),
+    saleReturns: getSaleReturns(),
+    stockMovements: getStockMovements(),
     expenses: getExpenses(),
     customers: getCustomers(),
+    vendors: getVendors(),
+    vendorPurchases: getVendorPurchases(),
+    vendorPayments: getVendorPayments(),
+    vendorReturns: getVendorReturns(),
     settings: getSettings(),
   };
   return JSON.stringify(data, null, 2);
 }
 
-export function importAllData(jsonString: string): boolean {
+export function importAllDataJSON(jsonStr: string): boolean {
   try {
-    const data = JSON.parse(jsonString);
-    if (data.products && Array.isArray(data.products)) {
-      safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(data.products));
-    }
-    if (data.sales && Array.isArray(data.sales)) {
-      safeSetItem(STORAGE_KEYS.SALES, JSON.stringify(data.sales));
-    }
-    if (data.expenses && Array.isArray(data.expenses)) {
-      safeSetItem(STORAGE_KEYS.EXPENSES, JSON.stringify(data.expenses));
-    }
-    if (data.customers && Array.isArray(data.customers)) {
-      safeSetItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(data.customers));
-    }
-    if (data.settings) {
-      safeSetItem(STORAGE_KEYS.SETTINGS, JSON.stringify(data.settings));
-    }
+    const data = JSON.parse(jsonStr);
+    if (data.products && Array.isArray(data.products)) saveProducts(data.products);
+    if (data.sales && Array.isArray(data.sales)) saveSales(data.sales);
+    if (data.saleReturns && Array.isArray(data.saleReturns)) saveSaleReturns(data.saleReturns);
+    if (data.stockMovements && Array.isArray(data.stockMovements)) saveStockMovements(data.stockMovements);
+    if (data.expenses && Array.isArray(data.expenses)) saveExpenses(data.expenses);
+    if (data.customers && Array.isArray(data.customers)) saveCustomers(data.customers);
+    if (data.vendors && Array.isArray(data.vendors)) saveVendors(data.vendors);
+    if (data.vendorPurchases && Array.isArray(data.vendorPurchases))
+      saveVendorPurchases(data.vendorPurchases);
+    if (data.vendorPayments && Array.isArray(data.vendorPayments))
+      saveVendorPayments(data.vendorPayments);
+    if (data.vendorReturns && Array.isArray(data.vendorReturns))
+      saveVendorReturns(data.vendorReturns);
+    if (data.settings) saveSettings(data.settings);
     return true;
   } catch (err) {
-    console.error("Failed to import data:", err);
+    console.error("Import failed:", err);
     return false;
   }
 }
-
-export function saveProducts(products: Product[]): void {
-  safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
-}
-
-export function saveSales(sales: Sale[]): void {
-  safeSetItem(STORAGE_KEYS.SALES, JSON.stringify(sales));
-}
-
-export function saveExpenses(expenses: Expense[]): void {
-  safeSetItem(STORAGE_KEYS.EXPENSES, JSON.stringify(expenses));
-}
-
-export function saveCustomers(customers: Customer[]): void {
-  safeSetItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(customers));
-}
-
-export const exportAllDataJSON = exportAllData;
-export const importAllDataJSON = importAllData;
-
-export function resetToSampleData(): void {
-  safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(INITIAL_PRODUCTS));
-  safeSetItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(INITIAL_CUSTOMERS));
-  safeSetItem(STORAGE_KEYS.SALES, JSON.stringify(INITIAL_SALES));
-  safeSetItem(STORAGE_KEYS.EXPENSES, JSON.stringify(INITIAL_EXPENSES));
-  safeSetItem(STORAGE_KEYS.SETTINGS, JSON.stringify(DEFAULT_SETTINGS));
-  safeSetItem(STORAGE_KEYS.INITIALIZED, "true");
-}
-
-

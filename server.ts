@@ -1,7 +1,23 @@
+import "dotenv/config";
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
+import { requireAuth, AuthRequest } from "./src/middleware/auth.ts";
+import { requireAdmin, AdminAuthRequest } from "./src/middleware/adminAuth.ts";
+import { getOrCreateUser } from "./src/db/users.ts";
+import { getUserData, syncUserData } from "./src/db/queries.ts";
+import {
+  getAdminOverviewMetrics,
+  getBusinessesList,
+  getBusinessDetails,
+  updateBusinessAccountStatus,
+  getSubscriptionsList,
+  getPaymentsList,
+  getLoginActivityList,
+  logUserLoginEvent,
+  ensureUserBusiness,
+} from "./src/db/adminQueries.ts";
 
 async function startServer() {
   const app = express();
@@ -12,6 +28,248 @@ async function startServer() {
   // Health check
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  // Client Supabase Configuration Discovery (Public Anon Key only, never service_role)
+  app.get("/api/config", (_req, res) => {
+    const rawUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "";
+    const rawAnonKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || "";
+
+    const cleanUrl = rawUrl.trim().replace(/^["']|["']$/g, "");
+    const cleanAnonKey = rawAnonKey.trim().replace(/^["']|["']$/g, "");
+
+    res.json({
+      supabaseUrl: cleanUrl,
+      supabaseAnonKey: cleanAnonKey,
+    });
+  });
+
+  // User Profile / Auth Sync
+  app.post("/api/auth/sync", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const uid = req.user?.uid;
+      const email = req.user?.email || "";
+      const name = (req.user as any)?.name || "";
+
+      if (!uid) {
+        return res.status(401).json({ error: "Unauthorized: Missing user identity" });
+      }
+
+      const userRecord = await getOrCreateUser(uid, email, name);
+
+      // Automatically register business profile & log login activity
+      const clientIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket.remoteAddress || "127.0.0.1";
+      const userAgent = (req.headers["user-agent"] as string) || "Unknown Browser";
+
+      await Promise.all([
+        ensureUserBusiness({
+          userId: uid,
+          email,
+          name,
+          shopName: name ? `${name}'s Store` : "SaleTrack Store",
+        }),
+        logUserLoginEvent({
+          userId: uid,
+          email,
+          businessName: name ? `${name}'s Store` : "SaleTrack Store",
+          status: "successful",
+          ipAddress: clientIp,
+          userAgent: userAgent.slice(0, 255),
+        }),
+      ]);
+
+      res.json({ success: true, user: userRecord });
+    } catch (error: any) {
+      console.error("Auth sync error:", error);
+      res.status(500).json({ error: error.message || "Failed to synchronize user account." });
+    }
+  });
+
+  // ==========================================
+  // SECURE ADMIN DASHBOARD API ROUTES
+  // ==========================================
+
+  // Verify Admin Access
+  app.get("/api/admin/check-access", requireAdmin, async (req: AdminAuthRequest, res) => {
+    res.json({
+      isAdmin: true,
+      role: req.admin?.role || "admin",
+      email: req.admin?.email,
+      name: req.admin?.name || "SaleTrack Administrator",
+    });
+  });
+
+  // 1. Dashboard Overview Metrics
+  app.get("/api/admin/overview", requireAdmin, async (_req: AdminAuthRequest, res) => {
+    try {
+      const metrics = await getAdminOverviewMetrics();
+      res.json({ success: true, metrics });
+    } catch (error: any) {
+      console.error("Admin overview error:", error);
+      res.status(500).json({ error: error.message || "Failed to load admin overview metrics." });
+    }
+  });
+
+  // 2. User & Business List (Searchable, filterable, paginated)
+  app.get("/api/admin/businesses", requireAdmin, async (req: AdminAuthRequest, res) => {
+    try {
+      const search = (req.query.search as string) || "";
+      const subscriptionStatus = (req.query.subscriptionStatus as string) || "all";
+      const accountStatus = (req.query.accountStatus as string) || "all";
+      const page = Number(req.query.page) || 1;
+      const limit = Number(req.query.limit) || 15;
+
+      const data = await getBusinessesList({
+        search,
+        subscriptionStatus,
+        accountStatus,
+        page,
+        limit,
+      });
+
+      res.json({ success: true, ...data });
+    } catch (error: any) {
+      console.error("Admin businesses error:", error);
+      res.status(500).json({ error: error.message || "Failed to load businesses list." });
+    }
+  });
+
+  // 3. Single Business Details (Admin Drill-Down)
+  app.get("/api/admin/businesses/:id", requireAdmin, async (req: AdminAuthRequest, res) => {
+    try {
+      const businessId = req.params.id;
+      const details = await getBusinessDetails(businessId);
+
+      if (!details) {
+        return res.status(404).json({ error: "Business account not found." });
+      }
+
+      res.json({ success: true, details });
+    } catch (error: any) {
+      console.error("Admin business details error:", error);
+      res.status(500).json({ error: error.message || "Failed to load business details." });
+    }
+  });
+
+  // 4. Update Business Account Status (Suspend / Reactivate)
+  app.post("/api/admin/businesses/:id/status", requireAdmin, async (req: AdminAuthRequest, res) => {
+    try {
+      const businessId = req.params.id;
+      const { status } = req.body;
+
+      if (!status || !["active", "suspended"].includes(status)) {
+        return res.status(400).json({ error: "Status must be either 'active' or 'suspended'." });
+      }
+
+      const updated = await updateBusinessAccountStatus(businessId, status);
+      if (!updated) {
+        return res.status(404).json({ error: "Business account not found." });
+      }
+
+      console.log(`[Admin Audit] Admin ${req.admin?.email} changed business ${businessId} status to ${status}`);
+      res.json({ success: true, business: updated });
+    } catch (error: any) {
+      console.error("Update business status error:", error);
+      res.status(500).json({ error: error.message || "Failed to update business status." });
+    }
+  });
+
+  // 5. Subscription Management List
+  app.get("/api/admin/subscriptions", requireAdmin, async (req: AdminAuthRequest, res) => {
+    try {
+      const search = (req.query.search as string) || "";
+      const status = (req.query.status as string) || "all";
+      const page = Number(req.query.page) || 1;
+      const limit = Number(req.query.limit) || 15;
+
+      const data = await getSubscriptionsList({ search, status, page, limit });
+      res.json({ success: true, ...data });
+    } catch (error: any) {
+      console.error("Admin subscriptions error:", error);
+      res.status(500).json({ error: error.message || "Failed to load subscriptions list." });
+    }
+  });
+
+  // 6. Payment Records List
+  app.get("/api/admin/payments", requireAdmin, async (req: AdminAuthRequest, res) => {
+    try {
+      const search = (req.query.search as string) || "";
+      const status = (req.query.status as string) || "all";
+      const page = Number(req.query.page) || 1;
+      const limit = Number(req.query.limit) || 15;
+
+      const data = await getPaymentsList({ search, status, page, limit });
+      res.json({ success: true, ...data });
+    } catch (error: any) {
+      console.error("Admin payments error:", error);
+      res.status(500).json({ error: error.message || "Failed to load payment transactions." });
+    }
+  });
+
+  // 7. Login Activity (Audit Trail)
+  app.get("/api/admin/login-activity", requireAdmin, async (req: AdminAuthRequest, res) => {
+    try {
+      const search = (req.query.search as string) || "";
+      const status = (req.query.status as string) || "all";
+      const page = Number(req.query.page) || 1;
+      const limit = Number(req.query.limit) || 20;
+
+      const data = await getLoginActivityList({ search, status, page, limit });
+      res.json({ success: true, ...data });
+    } catch (error: any) {
+      console.error("Admin login activity error:", error);
+      res.status(500).json({ error: error.message || "Failed to load login audit trail." });
+    }
+  });
+
+  // 8. Payment Provider Webhook Endpoint (Stripe or equivalent)
+  app.post("/api/webhooks/payment", async (req, res) => {
+    try {
+      const event = req.body;
+      const webhookSecret = process.env.PAYMENT_WEBHOOK_SECRET;
+
+      // In production, verify event signature with payment provider SDK
+      console.log(`[Payment Webhook] Received webhook event: ${event?.type || "unknown"}`);
+
+      // Respond promptly to provider
+      res.json({ received: true });
+    } catch (error: any) {
+      console.error("Payment webhook error:", error);
+      res.status(400).json({ error: "Webhook signature or handling failed." });
+    }
+  });
+
+  // Fetch all user data from Cloud SQL
+  app.get("/api/data", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const uid = req.user?.uid;
+      if (!uid) {
+        return res.status(401).json({ error: "Unauthorized: Missing user identity" });
+      }
+
+      const data = await getUserData(uid);
+      res.json({ success: true, data });
+    } catch (error: any) {
+      console.error("Fetch data error:", error);
+      res.status(500).json({ error: error.message || "Failed to load database records." });
+    }
+  });
+
+  // Save/Sync user data to Cloud SQL
+  app.post("/api/data", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const uid = req.user?.uid;
+      if (!uid) {
+        return res.status(401).json({ error: "Unauthorized: Missing user identity" });
+      }
+
+      const payload = req.body || {};
+      await syncUserData(uid, payload);
+      res.json({ success: true, message: "Records successfully persisted to Cloud SQL." });
+    } catch (error: any) {
+      console.error("Sync data error:", error);
+      res.status(500).json({ error: error.message || "Failed to save records to database." });
+    }
   });
 
   // Customer Email Receipt Endpoint (Secure server-side proxy)
