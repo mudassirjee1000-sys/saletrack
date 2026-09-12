@@ -59,6 +59,7 @@ export interface SaleItem {
 
 export interface Sale {
   id: string;
+  transactionId?: string; // Unique transaction/request ID for idempotency
   invoiceNumber: string;
   date: string;
   customerId?: string;
@@ -80,6 +81,7 @@ export interface Sale {
   paid: number;
   refundedAmount?: number;
   notes?: string;
+  createdAt?: string;
 }
 
 export interface SaleReturnItem {
@@ -243,6 +245,8 @@ export interface ShopSettings {
   shopName: string;
   shopPhone: string;
   shopAddress: string;
+  email?: string;
+  businessEmail?: string;
   currency: string;
   currencyCode?: string;
   currencyName?: string;

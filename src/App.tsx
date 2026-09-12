@@ -26,6 +26,7 @@ import {
   deleteProductInSupabase,
   fetchSalesForBusiness,
   upsertSaleInSupabase,
+  recordSaleApi,
   fetchExpensesForBusiness,
   upsertExpenseInSupabase,
   deleteExpenseInSupabase,
@@ -33,14 +34,18 @@ import {
   upsertCustomerInSupabase,
   fetchVendorsForBusiness,
   upsertVendorInSupabase,
+  deleteVendorInSupabase,
   fetchSaleReturnsForBusiness,
   createSaleReturnInSupabase,
+  recordSaleReturnApi,
   fetchStockMovementsForBusiness,
   createStockMovementInSupabase,
   fetchVendorPurchasesForBusiness,
   upsertVendorPurchaseInSupabase,
   fetchVendorPaymentsForBusiness,
   upsertVendorPaymentInSupabase,
+  fetchSettingsForBusiness,
+  upsertSettingsInSupabase,
 } from "./services/supabaseService";
 
 import { Sidebar, Header, MobileNav } from "./components/Navbar";
@@ -56,10 +61,9 @@ import { Settings } from "./components/Settings";
 import { InvoiceModal } from "./components/InvoiceModal";
 import { SaleReturnModal } from "./components/SaleReturnModal";
 import { AIAssistant } from "./components/AIAssistant";
-import { exportAllDataJSON, importAllDataJSON } from "./storage";
 
 export default function App() {
-  const { user, business, loading: authLoading, businessLoading, token, getIdToken } = useAuth();
+  const { user, business, loading: authLoading, businessLoading, token, getIdToken, refreshBusiness } = useAuth();
 
   // Route tracking
   const [currentPath, setCurrentPath] = useState(() =>
@@ -122,30 +126,44 @@ export default function App() {
   const [vendorPurchases, setVendorPurchases] = useState<VendorPurchase[]>([]);
   const [vendorPayments, setVendorPayments] = useState<VendorPayment[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
 
-  // Derive business settings from registered business
+  // Derive business settings from registered business and Supabase cloud persistence
   const [customSettings, setCustomSettings] = useState<Partial<ShopSettings>>({});
 
   const settings: ShopSettings = useMemo(() => {
+    const baseCurrency = customSettings.currency || business?.currency_symbol || "$";
+    const baseCurrencyCode = customSettings.currencyCode || business?.currency || "USD";
+    const baseCurrencyName = customSettings.currencyName || business?.currency || "US Dollar";
+
     if (!business) {
       return {
-        shopName: "SaleTrack Store",
-        shopPhone: "",
-        shopAddress: "",
-        currency: "$",
-        currencyCode: "USD",
-        currencyName: "US Dollar",
-        allowNegativeStock: false,
-        invoiceFooter: "SaleTrack — Sales, Stock & Profit Made Simple. Thank you for your business!",
+        shopName: customSettings.shopName || "SaleTrack Store",
+        shopPhone: customSettings.shopPhone || "",
+        shopAddress: customSettings.shopAddress || "",
+        email: customSettings.email || "",
+        currency: baseCurrency,
+        currencyCode: baseCurrencyCode,
+        currencyName: baseCurrencyName,
+        allowNegativeStock: customSettings.allowNegativeStock ?? false,
+        invoiceFooter:
+          customSettings.invoiceFooter ||
+          "SaleTrack — Sales, Stock & Profit Made Simple. Thank you for your business!",
+        autoEmailReceipt: customSettings.autoEmailReceipt ?? false,
+        taxEnabled: customSettings.taxEnabled ?? false,
+        taxRate: customSettings.taxRate ?? 0,
+        taxName: customSettings.taxName || "Tax",
+        receiptType: customSettings.receiptType || "thermal",
       };
     }
     return {
-      shopName: customSettings.shopName || business.business_name,
-      shopPhone: customSettings.shopPhone || business.phone_e164 || business.phone_number,
+      shopName: customSettings.shopName || business.business_name || business.name || "SaleTrack Store",
+      shopPhone: customSettings.shopPhone || business.phone_e164 || business.phone_number || "",
       shopAddress: customSettings.shopAddress || business.address || "",
-      currency: business.currency_symbol || "$",
-      currencyCode: business.currency || "USD",
-      currencyName: business.currency || "US Dollar",
+      email: customSettings.email || business.business_email || business.owner_email || "",
+      currency: baseCurrency,
+      currencyCode: baseCurrencyCode,
+      currencyName: baseCurrencyName,
       allowNegativeStock: customSettings.allowNegativeStock ?? false,
       invoiceFooter:
         customSettings.invoiceFooter ||
@@ -153,7 +171,8 @@ export default function App() {
       autoEmailReceipt: customSettings.autoEmailReceipt ?? false,
       taxEnabled: customSettings.taxEnabled ?? false,
       taxRate: customSettings.taxRate ?? 0,
-      taxName: customSettings.taxName || "Sales Tax",
+      taxName: customSettings.taxName || "Tax",
+      receiptType: customSettings.receiptType || "thermal",
     };
   }, [business, customSettings]);
 
@@ -191,8 +210,9 @@ export default function App() {
       fetchVendorsForBusiness(business.id),
       fetchVendorPurchasesForBusiness(business.id),
       fetchVendorPaymentsForBusiness(business.id),
+      fetchSettingsForBusiness(business.id),
     ])
-      .then(([prods, sls, rets, movs, exps, custs, vends, vPurchs, vPays]) => {
+      .then(([prods, sls, rets, movs, exps, custs, vends, vPurchs, vPays, cloudSettings]) => {
         if (!isMounted) return;
         setProducts(prods);
         setSales(sls);
@@ -203,11 +223,18 @@ export default function App() {
         setVendors(vends);
         setVendorPurchases(vPurchs);
         setVendorPayments(vPays);
+        if (cloudSettings) {
+          setCustomSettings(cloudSettings);
+        }
+        setSyncError(null);
         setDataLoading(false);
       })
       .catch((err) => {
         console.error("Error loading business data from Supabase:", err);
-        if (isMounted) setDataLoading(false);
+        if (isMounted) {
+          setSyncError("Failed to load business records from database: " + (err.message || "Connection failure."));
+          setDataLoading(false);
+        }
       });
 
     return () => {
@@ -302,95 +329,147 @@ export default function App() {
     [business?.id, products]
   );
 
+  const inFlightSalesRef = useRef<Set<string>>(new Set());
+  const processedTxIdsRef = useRef<Set<string>>(new Set());
+
   const handleSaveSale = useCallback(
     async (sale: Sale) => {
       if (!business?.id) return;
-      setSales((prev) => [sale, ...prev]);
+      const txId = sale.transactionId || sale.id;
 
-      // Deduct sold stock & record movements
-      setProducts((prevProducts) => {
-        const updated = prevProducts.map((prod) => {
-          const soldItem = sale.items.find((item) => item.productId === prod.id);
-          if (soldItem) {
-            const newStock = Math.max(0, prod.stock - soldItem.quantity);
-            const updatedProd = {
-              ...prod,
-              stock: newStock,
-            };
-            upsertProductInSupabase(business.id, updatedProd).catch(console.error);
-
-            const movement: StockMovement = {
-              id: "mov_" + crypto.randomUUID().replace(/-/g, ""),
-              productId: prod.id,
-              productName: prod.name,
-              type: "sale",
-              quantity: -soldItem.quantity,
-              stockBefore: prod.stock,
-              stockAfter: newStock,
-              reason: `Sale ${sale.invoiceNumber}`,
-              relatedInvoice: sale.invoiceNumber,
-              date: new Date().toISOString(),
-              createdAt: new Date().toISOString(),
-            };
-            setStockMovements((prevMov) => [movement, ...prevMov]);
-            createStockMovementInSupabase(business.id, movement).catch(console.error);
-
-            return updatedProd;
-          }
-          return prod;
-        });
-        return updated;
-      });
-
-      // Update customer record if credit sale
-      if (sale.paymentType === "credit" && sale.customerName) {
-        const creditRemaining = sale.total - sale.paid;
-        setCustomers((prevCustomers) => {
-          const existing = prevCustomers.find(
-            (c) =>
-              (sale.customerId && c.id === sale.customerId) ||
-              c.name.toLowerCase() === sale.customerName.toLowerCase()
-          );
-
-          if (existing) {
-            const updated = prevCustomers.map((c) => {
-              if (c.id === existing.id) {
-                const updatedCust = {
-                  ...c,
-                  totalCredit: c.totalCredit + creditRemaining,
-                  remaining: c.remaining + creditRemaining,
-                };
-                upsertCustomerInSupabase(business.id, updatedCust).catch(console.error);
-                return updatedCust;
-              }
-              return c;
-            });
-            return updated;
-          } else {
-            const newCust: Customer = {
-              id: "cust_" + crypto.randomUUID().replace(/-/g, ""),
-              name: sale.customerName,
-              phone: sale.customerPhone || "",
-              email: sale.customerEmail || "",
-              totalCredit: creditRemaining,
-              totalPaid: sale.paid,
-              remaining: creditRemaining,
-              payments: [],
-              createdAt: new Date().toISOString(),
-            };
-            upsertCustomerInSupabase(business.id, newCust).catch(console.error);
-            return [newCust, ...prevCustomers];
-          }
-        });
+      // In-flight or already processed duplicate check on frontend
+      if (inFlightSalesRef.current.has(txId) || processedTxIdsRef.current.has(txId)) {
+        console.warn(`[Duplicate Protection] Sale ${txId} is already in-flight or processed.`);
+        const existingSale = sales.find(
+          (s) => s.id === sale.id || (s.transactionId && s.transactionId === txId)
+        );
+        return existingSale || sale;
       }
+
+      inFlightSalesRef.current.add(txId);
 
       try {
-        await upsertSaleInSupabase(business.id, sale);
-      } catch (err) {
-        console.error("Failed to save sale in Supabase:", err);
+        // Authoritative server-side idempotent recording
+        const result = await recordSaleApi(business.id, sale, user?.id);
+
+        processedTxIdsRef.current.add(txId);
+
+        if (result.isDuplicate) {
+          console.log("[Duplicate Protection] Backend recognized duplicate transaction. Returning existing record without duplicate side-effects.");
+          setSales((prev) => {
+            const hasSale = prev.some(
+              (s) => s.id === result.sale.id || (s.transactionId && s.transactionId === txId)
+            );
+            if (hasSale) return prev;
+            return [result.sale, ...prev];
+          });
+          return result.sale;
+        }
+
+        // Fresh first-time sale: Update state & side-effects
+        const recordedSale = result.sale || sale;
+        setSales((prev) => [recordedSale, ...prev.filter((s) => s.id !== recordedSale.id)]);
+
+        // Deduct sold stock & record movements ONCE
+        setProducts((prevProducts) => {
+          const updated = prevProducts.map((prod) => {
+            const soldItem = recordedSale.items.find((item) => item.productId === prod.id);
+            if (soldItem) {
+              const newStock = Math.max(0, prod.stock - soldItem.quantity);
+              const updatedProd = {
+                ...prod,
+                stock: newStock,
+              };
+              upsertProductInSupabase(business.id, updatedProd).catch(console.error);
+
+              const movement: StockMovement = {
+                id: "mov_" + crypto.randomUUID().replace(/-/g, ""),
+                productId: prod.id,
+                productName: prod.name,
+                type: "sale",
+                quantity: -soldItem.quantity,
+                stockBefore: prod.stock,
+                stockAfter: newStock,
+                reason: `Sale ${recordedSale.invoiceNumber}`,
+                relatedInvoice: recordedSale.invoiceNumber,
+                date: new Date().toISOString(),
+                createdAt: new Date().toISOString(),
+              };
+              setStockMovements((prevMov) => [movement, ...prevMov]);
+              createStockMovementInSupabase(business.id, movement).catch(console.error);
+
+              return updatedProd;
+            }
+            return prod;
+          });
+          return updated;
+        });
+
+        // Update customer record if credit sale ONCE
+        if (recordedSale.paymentType === "credit" && recordedSale.customerName) {
+          const creditRemaining = recordedSale.total - recordedSale.paid;
+          setCustomers((prevCustomers) => {
+            const existing = prevCustomers.find(
+              (c) =>
+                (recordedSale.customerId && c.id === recordedSale.customerId) ||
+                c.name.toLowerCase() === recordedSale.customerName.toLowerCase()
+            );
+
+            if (existing) {
+              const updated = prevCustomers.map((c) => {
+                if (c.id === existing.id) {
+                  const updatedCust = {
+                    ...c,
+                    totalCredit: c.totalCredit + creditRemaining,
+                    remaining: c.remaining + creditRemaining,
+                  };
+                  upsertCustomerInSupabase(business.id, updatedCust).catch(console.error);
+                  return updatedCust;
+                }
+                return c;
+              });
+              return updated;
+            } else {
+              const newCust: Customer = {
+                id: "cust_" + crypto.randomUUID().replace(/-/g, ""),
+                name: recordedSale.customerName,
+                phone: recordedSale.customerPhone || "",
+                email: recordedSale.customerEmail || "",
+                totalCredit: creditRemaining,
+                totalPaid: recordedSale.paid,
+                remaining: creditRemaining,
+                payments: [],
+                createdAt: new Date().toISOString(),
+              };
+              upsertCustomerInSupabase(business.id, newCust).catch(console.error);
+              return [newCust, ...prevCustomers];
+            }
+          });
+        }
+
+        // Automatic email receipt when configured
+        if (settings.autoEmailReceipt) {
+          const recipient = recordedSale.customerEmail || customers.find((c) => c.id === recordedSale.customerId)?.email;
+          if (recipient && recipient.includes("@")) {
+            fetch("/api/email/send-receipt", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                to: recipient,
+                customerName: recordedSale.customerName,
+                sale: recordedSale,
+                settings,
+              }),
+            }).catch((err) => console.warn("Auto email receipt notice:", err));
+          }
+        }
+
+        return recordedSale;
+      } finally {
+        inFlightSalesRef.current.delete(txId);
       }
     },
-    [business?.id]
+    [business?.id, user?.id, sales, customers, settings]
   );
 
   const handleProcessReturn = useCallback(
@@ -403,84 +482,102 @@ export default function App() {
     ) => {
       if (!business?.id) return;
 
-      // 1. Add return record to state and Supabase
-      setSaleReturns((prev) => [saleReturn, ...prev]);
-      createSaleReturnInSupabase(business.id, saleReturn).catch(console.error);
+      try {
+        const result = await recordSaleReturnApi(
+          business.id,
+          saleReturn,
+          options,
+          user?.id
+        );
 
-      // 2. Update sale refundedAmount and status
-      setSales((prevSales) => {
-        const updated = prevSales.map((s) => {
-          if (s.id === saleReturn.saleId) {
-            const newRefunded = (s.refundedAmount || 0) + saleReturn.refundAmount;
-            const newStatus: "completed" | "unpaid" | "refunded" | "partially_refunded" =
-              newRefunded >= s.total ? "refunded" : "partially_refunded";
-            const updatedSale: Sale = {
-              ...s,
-              refundedAmount: newRefunded,
-              status: newStatus,
+        // 1. Add return record to state
+        setSaleReturns((prev) => {
+          const exists = prev.some((r) => r.id === result.saleReturn.id);
+          return exists ? prev : [result.saleReturn, ...prev];
+        });
+
+        // 2. Update sale refundedAmount and status
+        setSales((prevSales) => {
+          return prevSales.map((s) => {
+            if (s.id === saleReturn.saleId || (s.invoiceNumber && s.invoiceNumber === saleReturn.invoiceNumber)) {
+              if (result.updatedSale) {
+                return { ...s, ...result.updatedSale };
+              }
+              const newRefunded = Math.min(s.total, (s.refundedAmount || 0) + saleReturn.refundAmount);
+              const newStatus: "completed" | "unpaid" | "refunded" | "partially_refunded" =
+                newRefunded >= s.total ? "refunded" : "partially_refunded";
+              return {
+                ...s,
+                refundedAmount: newRefunded,
+                status: newStatus,
+              };
+            }
+            return s;
+          });
+        });
+
+        // 3. Restock items in UI state if requested
+        if (options.restock && saleReturn.items?.length > 0) {
+          setProducts((prevProds) => {
+            return prevProds.map((prod) => {
+              const returnedItem = saleReturn.items.find((it) => it.productId === prod.id);
+              if (returnedItem) {
+                const newStock = prod.stock + returnedItem.quantity;
+                return { ...prod, stock: newStock };
+              }
+              return prod;
+            });
+          });
+
+          // Stock movement logs
+          saleReturn.items.forEach((returnedItem) => {
+            const prod = products.find((p) => p.id === returnedItem.productId);
+            const curStock = prod?.stock || 0;
+            const movement: StockMovement = {
+              id: "mov_" + crypto.randomUUID().replace(/-/g, ""),
+              productId: returnedItem.productId,
+              productName: returnedItem.productName,
+              type: "sale_return",
+              quantity: returnedItem.quantity,
+              stockBefore: curStock,
+              stockAfter: curStock + returnedItem.quantity,
+              reason: `Customer return for invoice #${saleReturn.invoiceNumber}: ${saleReturn.reason}`,
+              relatedInvoice: saleReturn.invoiceNumber,
+              date: new Date().toISOString(),
+              createdAt: new Date().toISOString(),
             };
-            upsertSaleInSupabase(business.id, updatedSale).catch(console.error);
-            return updatedSale;
-          }
-          return s;
-        });
-        return updated;
-      });
-
-      // 3. Restock items if requested
-      if (options.restock) {
-        setProducts((prevProds) => {
-          return prevProds.map((prod) => {
-            const returnedItem = saleReturn.items.find((it) => it.productId === prod.id);
-            if (returnedItem) {
-              const newStock = prod.stock + returnedItem.quantity;
-              const updatedProd = { ...prod, stock: newStock };
-              upsertProductInSupabase(business.id, updatedProd).catch(console.error);
-
-              // Record stock movement
-              const movement: StockMovement = {
-                id: "mov_" + crypto.randomUUID().replace(/-/g, ""),
-                productId: prod.id,
-                productName: prod.name,
-                type: "sale_return",
-                quantity: returnedItem.quantity,
-                stockBefore: prod.stock,
-                stockAfter: newStock,
-                reason: `Customer return for invoice #${saleReturn.invoiceNumber}: ${saleReturn.reason}`,
-                relatedInvoice: saleReturn.invoiceNumber,
-                date: new Date().toISOString(),
-                createdAt: new Date().toISOString(),
-              };
-              setStockMovements((prev) => [movement, ...prev]);
-              createStockMovementInSupabase(business.id, movement).catch(console.error);
-
-              return updatedProd;
-            }
-            return prod;
+            setStockMovements((prev) => [movement, ...prev]);
           });
-        });
-      }
+        }
 
-      // 4. If credit deduction refund method and customer exists, adjust customer remaining
-      if (options.refundMethod === "credit_adjustment" && saleReturn.customerId) {
-        setCustomers((prevCusts) => {
-          return prevCusts.map((c) => {
-            if (c.id === saleReturn.customerId) {
-              const updatedCust = {
-                ...c,
-                remaining: Math.max(0, c.remaining - saleReturn.refundAmount),
-              };
-              upsertCustomerInSupabase(business.id, updatedCust).catch(console.error);
-              return updatedCust;
-            }
-            return c;
+        // 4. Update customer credit balance if adjusted
+        if (options.refundMethod === "credit_adjustment" && saleReturn.customerId) {
+          setCustomers((prevCusts) => {
+            return prevCusts.map((c) => {
+              if (c.id === saleReturn.customerId) {
+                if (result.updatedCustomer) {
+                  return { ...c, ...result.updatedCustomer };
+                }
+                const newRem = Math.max(0, c.remaining - saleReturn.refundAmount);
+                const newCred = Math.max(0, c.totalCredit - saleReturn.refundAmount);
+                return {
+                  ...c,
+                  remaining: newRem,
+                  totalCredit: newCred,
+                };
+              }
+              return c;
+            });
           });
-        });
-      }
+        }
 
-      setReturnTargetSale(null);
+        setReturnTargetSale(null);
+      } catch (err: any) {
+        console.error("Failed to process sale return:", err);
+        throw err;
+      }
     },
-    [business?.id]
+    [business?.id, user?.id, products]
   );
 
   const handleSaveExpense = useCallback(
@@ -587,6 +684,12 @@ export default function App() {
     async (id: string) => {
       if (!business?.id) return;
       setVendors((prev) => prev.filter((v) => v.id !== id));
+      try {
+        await deleteVendorInSupabase(business.id, id);
+      } catch (err: any) {
+        console.error("Failed to delete vendor in Supabase:", err);
+        setSyncError("Failed to delete vendor: " + (err.message || "Database error"));
+      }
     },
     [business?.id]
   );
@@ -680,28 +783,111 @@ export default function App() {
     [business?.id]
   );
 
-  const handleSaveSettings = useCallback((newSettings: ShopSettings) => {
-    setCustomSettings(newSettings);
-  }, []);
+  const handleSaveSettings = useCallback(
+    async (newSettings: ShopSettings) => {
+      if (!business?.id) {
+        throw new Error("No active business found. Please register or select your business.");
+      }
+      // Update local React state immediately
+      setCustomSettings(newSettings);
+
+      // Persist persistently to Supabase & Cloud DB
+      await upsertSettingsInSupabase(business.id, newSettings);
+
+      // Refresh business context to update header and store name
+      await refreshBusiness().catch(console.warn);
+    },
+    [business?.id, refreshBusiness]
+  );
 
   const handleExportData = useCallback(() => {
-    const json = exportAllDataJSON();
+    const data = {
+      version: "3.0",
+      exportDate: new Date().toISOString(),
+      businessId: business?.id,
+      businessName: settings.shopName,
+      products,
+      sales,
+      saleReturns,
+      stockMovements,
+      expenses,
+      customers,
+      vendors,
+      vendorPurchases,
+      vendorPayments,
+      settings,
+    };
+    const json = JSON.stringify(data, null, 2);
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `saletrack-backup-${new Date().toISOString().split("T")[0]}.json`;
+    a.download = `saletrack-backup-${(settings.shopName || "store").toLowerCase().replace(/\s+/g, "-")}-${new Date().toISOString().split("T")[0]}.json`;
     a.click();
     URL.revokeObjectURL(url);
-  }, []);
+  }, [
+    business?.id,
+    settings,
+    products,
+    sales,
+    saleReturns,
+    stockMovements,
+    expenses,
+    customers,
+    vendors,
+    vendorPurchases,
+    vendorPayments,
+  ]);
 
   const handleImportData = useCallback(
-    (jsonData: string): boolean => {
-      const success = importAllDataJSON(jsonData);
-      if (success && business?.id) {
-        window.location.reload();
+    async (jsonData: string): Promise<boolean> => {
+      if (!business?.id) {
+        setSyncError("Cannot import data: No active business profile.");
+        return false;
       }
-      return success;
+      try {
+        const data = JSON.parse(jsonData);
+        if (Array.isArray(data.products)) {
+          for (const p of data.products) {
+            await upsertProductInSupabase(business.id, p);
+          }
+          setProducts(data.products);
+        }
+        if (Array.isArray(data.customers)) {
+          for (const c of data.customers) {
+            await upsertCustomerInSupabase(business.id, c);
+          }
+          setCustomers(data.customers);
+        }
+        if (Array.isArray(data.expenses)) {
+          for (const e of data.expenses) {
+            await upsertExpenseInSupabase(business.id, e);
+          }
+          setExpenses(data.expenses);
+        }
+        if (Array.isArray(data.vendors)) {
+          for (const v of data.vendors) {
+            await upsertVendorInSupabase(business.id, v);
+          }
+          setVendors(data.vendors);
+        }
+        if (Array.isArray(data.sales)) {
+          for (const s of data.sales) {
+            await upsertSaleInSupabase(business.id, s);
+          }
+          setSales(data.sales);
+        }
+        if (data.settings) {
+          await upsertSettingsInSupabase(business.id, data.settings);
+          setCustomSettings(data.settings);
+        }
+        setSyncError(null);
+        return true;
+      } catch (err: any) {
+        console.error("Import to Supabase failed:", err);
+        setSyncError("Import failed: " + (err.message || "Invalid backup JSON"));
+        return false;
+      }
     },
     [business?.id]
   );
@@ -709,20 +895,44 @@ export default function App() {
   const handleResetData = useCallback(() => {
     if (
       window.confirm(
-        "Are you sure you want to clear your local view? Data in Supabase will remain safe."
+        "Are you sure you want to refresh your view from Supabase?"
       )
     ) {
-      setProducts([]);
-      setSales([]);
-      setSaleReturns([]);
-      setStockMovements([]);
-      setExpenses([]);
-      setCustomers([]);
-      setVendors([]);
-      setVendorPurchases([]);
-      setVendorPayments([]);
+      if (business?.id) {
+        setDataLoading(true);
+        Promise.all([
+          fetchProductsForBusiness(business.id),
+          fetchSalesForBusiness(business.id),
+          fetchSaleReturnsForBusiness(business.id),
+          fetchStockMovementsForBusiness(business.id),
+          fetchExpensesForBusiness(business.id),
+          fetchCustomersForBusiness(business.id),
+          fetchVendorsForBusiness(business.id),
+          fetchVendorPurchasesForBusiness(business.id),
+          fetchVendorPaymentsForBusiness(business.id),
+          fetchSettingsForBusiness(business.id),
+        ])
+          .then(([prods, sls, rets, movs, exps, custs, vends, vPurchs, vPays, cloudSettings]) => {
+            setProducts(prods);
+            setSales(sls);
+            setSaleReturns(rets);
+            setStockMovements(movs);
+            setExpenses(exps);
+            setCustomers(custs);
+            setVendors(vends);
+            setVendorPurchases(vPurchs);
+            setVendorPayments(vPays);
+            if (cloudSettings) setCustomSettings(cloudSettings);
+            setSyncError(null);
+            setDataLoading(false);
+          })
+          .catch((err) => {
+            setSyncError("Refresh failed: " + (err.message || "Database connection error"));
+            setDataLoading(false);
+          });
+      }
     }
-  }, []);
+  }, [business?.id]);
 
   // Quick stats calculations for Sidebar & Header badges
   const lowStockCount = useMemo(
@@ -786,10 +996,26 @@ export default function App() {
         {/* Scrollable Dashboard Tab Content */}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 pb-24 md:pb-8">
           <div className="max-w-7xl mx-auto">
+            {syncError && (
+              <div className="mb-6 p-4 bg-rose-50 border border-rose-200 rounded-xl flex items-center justify-between text-rose-800 text-sm shadow-xs">
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold">Database Warning:</span>
+                  <span>{syncError}</span>
+                </div>
+                <button
+                  onClick={() => setSyncError(null)}
+                  className="text-rose-600 hover:text-rose-800 font-medium text-xs px-2.5 py-1 rounded-md hover:bg-rose-100 transition-colors"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
             {activeTab === "dashboard" && (
               <Dashboard
                 products={products}
                 sales={sales}
+                saleReturns={saleReturns}
                 expenses={expenses}
                 customers={customers}
                 settings={settings}
@@ -883,6 +1109,7 @@ export default function App() {
               <Reports
                 products={products}
                 sales={sales}
+                saleReturns={saleReturns}
                 expenses={expenses}
                 customers={customers}
                 settings={settings}

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Product, Sale, SaleItem, Customer, ShopSettings, SaleReturn } from "../types";
 import { SaleReturnModal } from "./SaleReturnModal";
 import {
@@ -20,6 +20,7 @@ import {
   Percent,
   Check,
   Package,
+  Loader2,
 } from "lucide-react";
 
 interface SalesProps {
@@ -28,7 +29,7 @@ interface SalesProps {
   saleReturns?: SaleReturn[];
   customers: Customer[];
   settings: ShopSettings;
-  onRecordSale: (sale: Sale) => void;
+  onRecordSale: (sale: Sale) => Promise<any> | void;
   onViewInvoice: (sale: Sale) => void;
   onSaveCustomer: (customer: Customer) => void;
   onProcessReturn?: (
@@ -66,6 +67,10 @@ export const Sales: React.FC<SalesProps> = ({
   const [discountType, setDiscountType] = useState<"fixed" | "percent">("fixed");
   const [applyTax, setApplyTax] = useState<boolean>(Boolean(settings.taxEnabled));
 
+  useEffect(() => {
+    setApplyTax(Boolean(settings.taxEnabled));
+  }, [settings.taxEnabled]);
+
   // Customer & Payment State
   const [paymentType, setPaymentType] = useState<"cash" | "credit">("cash");
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>("");
@@ -73,6 +78,8 @@ export const Sales: React.FC<SalesProps> = ({
   const [customCustomerPhone, setCustomCustomerPhone] = useState<string>("");
   const [isQuickAddCustomerOpen, setIsQuickAddCustomerOpen] = useState<boolean>(false);
   const [saleError, setSaleError] = useState<string>("");
+  const [isProcessingSale, setIsProcessingSale] = useState<boolean>(false);
+  const isSubmittingRef = useRef<boolean>(false);
 
   // Sales History Filter
   const [historySearch, setHistorySearch] = useState("");
@@ -247,9 +254,15 @@ export const Sales: React.FC<SalesProps> = ({
     setCustomCustomerPhone("");
   };
 
-  // Complete & Save Sale
-  const handleCompleteSale = () => {
+  // Complete & Save Sale (Protected against double clicks, slow networks, and duplicate requests)
+  const handleCompleteSale = async () => {
     setSaleError("");
+
+    // Synchronous immediate guard to prevent race conditions on rapid double clicks
+    if (isSubmittingRef.current || isProcessingSale) {
+      console.warn("Sale submission already in progress. Ignoring duplicate click.");
+      return;
+    }
 
     if (cart.length === 0) {
       setSaleError("Your cart is empty. Add at least one product.");
@@ -282,45 +295,79 @@ export const Sales: React.FC<SalesProps> = ({
       }
     }
 
-    const now = new Date();
-    const dateFormatted = `${now.toISOString().slice(0, 10)} ${now
-      .toTimeString()
-      .slice(0, 5)}`;
-    const invoiceNum = `INV-${now.toISOString().slice(0, 10).replace(/-/g, "")}-${(
-      sales.length + 1
-    )
-      .toString()
-      .padStart(3, "0")}`;
+    // Lock button and show "Processing Sale..." immediately
+    isSubmittingRef.current = true;
+    setIsProcessingSale(true);
 
-    const newSale: Sale = {
-      id: "sale-" + Date.now(),
-      invoiceNumber: invoiceNum,
-      date: dateFormatted,
-      customerId: selectedCustomerId || undefined,
-      customerName,
-      customerPhone,
-      paymentType,
-      items: [...cart],
-      subtotal,
-      discount: calculatedDiscount,
-      tax: calculatedTax,
-      taxRate: applyTax ? taxRate : 0,
-      taxName: settings.taxName || "Tax",
-      total: grandTotal,
-      profit: totalProfit - calculatedDiscount,
-      paid: paymentType === "cash" ? grandTotal : 0,
-      refundedAmount: 0,
-      status: paymentType === "cash" ? "completed" : "unpaid",
-    };
+    try {
+      const now = new Date();
+      const dateFormatted = `${now.toISOString().slice(0, 10)} ${now
+        .toTimeString()
+        .slice(0, 5)}`;
 
-    onRecordSale(newSale);
+      // Generate a unique transaction/request ID for this sale attempt
+      const transactionId = `tx_${Date.now()}_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
 
-    // Reset state & show invoice
-    setCart([]);
-    setSelectedCustomerId("");
-    setPaymentType("cash");
-    setDiscountAmount(0);
-    onViewInvoice(newSale);
+      // Generate a guaranteed non-colliding invoice number
+      const dateStr = now.toISOString().slice(0, 10).replace(/-/g, "");
+      const prefix = `INV-${dateStr}-`;
+      const todaySales = sales.filter((s) => s.invoiceNumber?.startsWith(prefix));
+      let maxSeq = 0;
+      for (const s of todaySales) {
+        const parts = s.invoiceNumber.split("-");
+        const numPart = parseInt(parts[2], 10);
+        if (!isNaN(numPart) && numPart > maxSeq) {
+          maxSeq = numPart;
+        }
+      }
+      const nextSeq = Math.max(maxSeq + 1, todaySales.length + 1);
+      let invoiceNum = `${prefix}${nextSeq.toString().padStart(3, "0")}`;
+      let counter = nextSeq;
+      while (sales.some((s) => s.invoiceNumber === invoiceNum)) {
+        counter++;
+        invoiceNum = `${prefix}${counter.toString().padStart(3, "0")}`;
+      }
+
+      const newSale: Sale = {
+        id: "sale-" + Date.now() + "-" + Math.floor(1000 + Math.random() * 9000),
+        transactionId,
+        invoiceNumber: invoiceNum,
+        date: dateFormatted,
+        customerId: selectedCustomerId || undefined,
+        customerName,
+        customerPhone,
+        paymentType,
+        items: [...cart],
+        subtotal,
+        discount: calculatedDiscount,
+        tax: calculatedTax,
+        taxRate: applyTax ? taxRate : 0,
+        taxName: settings.taxName || "Tax",
+        total: grandTotal,
+        profit: totalProfit - calculatedDiscount,
+        paid: paymentType === "cash" ? grandTotal : 0,
+        refundedAmount: 0,
+        status: paymentType === "cash" ? "completed" : "unpaid",
+      };
+
+      // Call authoritative record handler
+      const result = await Promise.resolve(onRecordSale(newSale));
+      const finalSale = (result && typeof result === "object" && "invoiceNumber" in result) ? (result as Sale) : newSale;
+
+      // Reset state & show invoice
+      setCart([]);
+      setSelectedCustomerId("");
+      setPaymentType("cash");
+      setDiscountAmount(0);
+      onViewInvoice(finalSale);
+    } catch (err: any) {
+      console.error("Sale completion error:", err);
+      setSaleError(err?.message || "Failed to complete sale. The transaction was cancelled and can be retried.");
+    } finally {
+      // Re-enable button
+      isSubmittingRef.current = false;
+      setIsProcessingSale(false);
+    }
   };
 
   // History filtered
@@ -630,7 +677,7 @@ export const Sales: React.FC<SalesProps> = ({
                     </div>
                   </div>
 
-                  {settings.taxRate ? (
+                  {settings.taxEnabled ? (
                     <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-200">
                       <label className="flex items-center gap-1.5 cursor-pointer">
                         <input
@@ -770,11 +817,24 @@ export const Sales: React.FC<SalesProps> = ({
               <button
                 id="complete-sale-btn"
                 onClick={handleCompleteSale}
-                disabled={cart.length === 0}
-                className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-xl shadow-md shadow-blue-600/20 active:scale-95 transition disabled:opacity-40 disabled:pointer-events-none flex items-center justify-center gap-2"
+                disabled={isProcessingSale || cart.length === 0}
+                className={`w-full py-3 text-white font-bold text-sm rounded-xl shadow-md transition flex items-center justify-center gap-2 ${
+                  isProcessingSale
+                    ? "bg-blue-400 cursor-not-allowed opacity-90 shadow-none"
+                    : "bg-blue-600 hover:bg-blue-700 shadow-blue-600/20 active:scale-95 disabled:opacity-40 disabled:pointer-events-none"
+                }`}
               >
-                <CheckCircle2 className="w-4 h-4" />
-                <span>Save Sale & Issue Receipt</span>
+                {isProcessingSale ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Processing Sale...</span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Save Sale & Issue Receipt</span>
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -972,9 +1032,10 @@ export const Sales: React.FC<SalesProps> = ({
           onClose={() => setReturnTargetSale(null)}
           sale={returnTargetSale}
           settings={settings}
+          saleReturns={saleReturns}
           onProcessReturn={(returnRecord, options) => {
             if (onProcessReturn) {
-              onProcessReturn(returnRecord, options);
+              return onProcessReturn(returnRecord, options);
             }
           }}
         />

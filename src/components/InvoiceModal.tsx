@@ -63,7 +63,7 @@ export const InvoiceModal: React.FC<InvoiceModalProps> = ({
         <div class="header">
           <h1 class="title">${settings.shopName}</h1>
           <p class="sub">${settings.shopAddress || ""}</p>
-          <p class="sub">Tel: ${settings.shopPhone || ""}</p>
+          <p class="sub">${settings.shopPhone ? `Tel: ${settings.shopPhone}` : ""} ${settings.email ? `| Email: ${settings.email}` : ""}</p>
         </div>
         <div class="meta">
           <div><strong>Invoice #:</strong> ${sale.invoiceNumber}</div>
@@ -254,6 +254,9 @@ ${settings.invoiceFooter || "Thank you for your business!"}`;
             )}
             {settings.shopPhone && (
               <p className="text-xs text-slate-400">Phone: {settings.shopPhone}</p>
+            )}
+            {settings.email && (
+              <p className="text-xs text-slate-400">Email: {settings.email}</p>
             )}
           </div>
 

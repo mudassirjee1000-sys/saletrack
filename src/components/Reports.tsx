@@ -1,5 +1,6 @@
 import React, { useState } from "react";
-import { Product, Sale, Expense, Customer, ShopSettings } from "../types";
+import { Product, Sale, Expense, Customer, ShopSettings, SaleReturn } from "../types";
+import { calculateAccountingMetrics, calculateProductPerformance } from "../utils/calculations";
 import {
   BarChart3,
   Calendar,
@@ -18,6 +19,7 @@ import {
 interface ReportsProps {
   products: Product[];
   sales: Sale[];
+  saleReturns?: SaleReturn[];
   expenses: Expense[];
   customers: Customer[];
   settings: ShopSettings;
@@ -28,6 +30,7 @@ type DateFilterType = "today" | "week" | "month" | "custom";
 export const Reports: React.FC<ReportsProps> = ({
   products,
   sales,
+  saleReturns = [],
   expenses,
   customers,
   settings,
@@ -61,30 +64,31 @@ export const Reports: React.FC<ReportsProps> = ({
     return !isNaN(sDate.getTime()) && sDate >= startDate && sDate <= endDate;
   });
 
+  // Filter returns within range
+  const filteredReturns = (saleReturns || []).filter((r) => {
+    const rDate = new Date(r.date.replace(" ", "T"));
+    return !isNaN(rDate.getTime()) && rDate >= startDate && rDate <= endDate;
+  });
+
   // Filter expenses within range
   const filteredExpenses = expenses.filter((e) => {
     const eDate = new Date(`${e.date}T12:00:00`);
     return !isNaN(eDate.getTime()) && eDate >= startDate && eDate <= endDate;
   });
 
-  // Financial Metrics with Returns & Refunds accuracy
-  const totalGrossSales = filteredSales.reduce((sum, s) => sum + s.total, 0);
-  const totalRefunds = filteredSales.reduce((sum, s) => sum + (s.refundedAmount || 0), 0);
-  const netSalesRevenue = Math.max(0, totalGrossSales - totalRefunds);
-
-  const totalGrossProfit = filteredSales.reduce((sum, s) => {
-    const refundRatio = s.total > 0 ? (s.refundedAmount || 0) / s.total : 0;
-    return sum + Math.max(0, s.profit - s.profit * refundRatio);
-  }, 0);
-
-  const totalExpensesAmount = filteredExpenses.reduce((sum, e) => sum + e.amount, 0);
-  const totalNetProfit = totalGrossProfit - totalExpensesAmount;
-  const profitMarginPercent =
-    netSalesRevenue > 0 ? Math.round((totalNetProfit / netSalesRevenue) * 100) : 0;
+  // Unified Accounting Metrics
+  const accounting = calculateAccountingMetrics(filteredSales, filteredExpenses, filteredReturns);
+  const totalGrossSales = accounting.grossSales;
+  const totalRefunds = accounting.totalRefunds;
+  const netSalesRevenue = accounting.totalSales;
+  const totalGrossProfit = accounting.grossProfit;
+  const totalExpensesAmount = accounting.operatingExpenses;
+  const totalNetProfit = accounting.netProfit;
+  const profitMarginPercent = accounting.netMarginPercentage;
   const numberOfSales = filteredSales.length;
 
   // Outstanding customer credit (all-time active)
-  const totalOutstandingCredit = customers.reduce((sum, c) => sum + c.remaining, 0);
+  const totalOutstandingCredit = customers.reduce((sum, c) => sum + (c.remaining || 0), 0);
 
   // Current Inventory Valuation
   const totalStockUnits = products.reduce((sum, p) => sum + p.stock, 0);
@@ -92,30 +96,8 @@ export const Reports: React.FC<ReportsProps> = ({
   const totalStockRetail = products.reduce((sum, p) => sum + p.stock * p.sellingPrice, 0);
   const potentialStockProfit = Math.max(0, totalStockRetail - totalStockCost);
 
-  // Best-selling products aggregation in this period
-  const productPerformanceMap: Record<
-    string,
-    { name: string; sku: string; qty: number; revenue: number; profit: number }
-  > = {};
-
-  filteredSales.forEach((s) => {
-    s.items.forEach((item) => {
-      if (!productPerformanceMap[item.productId]) {
-        productPerformanceMap[item.productId] = {
-          name: item.productName,
-          sku: item.sku,
-          qty: 0,
-          revenue: 0,
-          profit: 0,
-        };
-      }
-      productPerformanceMap[item.productId].qty += item.quantity;
-      productPerformanceMap[item.productId].revenue += item.total;
-      productPerformanceMap[item.productId].profit += item.profit;
-    });
-  });
-
-  const bestSellingProducts = Object.values(productPerformanceMap).sort((a, b) => b.qty - a.qty);
+  // Best-selling products performance (with accurate return and refund deductions)
+  const bestSellingProducts = calculateProductPerformance(filteredSales, filteredReturns);
 
   // Expense categories aggregation
   const expenseCatMap: Record<string, number> = {};
@@ -247,6 +229,50 @@ export const Reports: React.FC<ReportsProps> = ({
         </div>
       </div>
 
+      {/* Returns & Refunds Reconciliation Banner (Visible when returns exist in period) */}
+      {totalRefunds > 0 && (
+        <div className="bg-amber-50/60 border border-amber-200 rounded-xl p-4 sm:p-5 shadow-xs">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-amber-200/60">
+            <div className="flex items-center gap-2">
+              <RotateCcw className="w-4 h-4 text-amber-700 shrink-0" />
+              <h4 className="text-xs sm:text-sm font-bold text-amber-900">
+                Returns & Refunds Reconciliation
+              </h4>
+            </div>
+            <span className="text-xs font-bold text-amber-800">
+              Total Refunded: {settings.currency}{totalRefunds.toFixed(2)}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 text-xs">
+            <div>
+              <span className="text-[10px] text-slate-500 uppercase block font-semibold">Cash Refunds</span>
+              <span className="font-bold text-slate-800">
+                {settings.currency}{accounting.cashRefunds.toFixed(2)}
+              </span>
+            </div>
+            <div>
+              <span className="text-[10px] text-slate-500 uppercase block font-semibold">Card / Bank</span>
+              <span className="font-bold text-slate-800">
+                {settings.currency}{(accounting.cardRefunds + accounting.bankRefunds).toFixed(2)}
+              </span>
+            </div>
+            <div>
+              <span className="text-[10px] text-slate-500 uppercase block font-semibold">Credit Deductions</span>
+              <span className="font-bold text-slate-800">
+                {settings.currency}{accounting.creditAdjustments.toFixed(2)}
+              </span>
+            </div>
+            <div>
+              <span className="text-[10px] text-emerald-700 uppercase block font-semibold">Restocked COGS</span>
+              <span className="font-bold text-emerald-700">
+                +{settings.currency}{accounting.reversedCogs.toFixed(2)}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Inventory Valuation & Customer Dues Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {/* Inventory Valuation */}
@@ -330,7 +356,7 @@ export const Reports: React.FC<ReportsProps> = ({
               <div className="space-y-2">
                 {bestSellingProducts.slice(0, 5).map((p, idx) => (
                   <div
-                    key={p.sku || idx}
+                    key={p.productId || p.sku || idx}
                     className="flex items-center justify-between p-2.5 rounded-lg bg-slate-50 text-xs"
                   >
                     <div className="flex items-center gap-2 min-w-0">
@@ -339,15 +365,22 @@ export const Reports: React.FC<ReportsProps> = ({
                       </span>
                       <div className="truncate">
                         <span className="font-semibold text-slate-800 block truncate">{p.name}</span>
-                        <span className="text-[10px] text-slate-400">SKU: {p.sku}</span>
+                        <span className="text-[10px] text-slate-400">SKU: {p.sku || "N/A"}</span>
                       </div>
                     </div>
 
                     <div className="text-right shrink-0">
-                      <span className="font-bold text-slate-800 block">{p.qty} sold</span>
+                      <span className="font-bold text-slate-800 block">
+                        {p.netQty} net sold
+                        {p.returnedQty > 0 && (
+                          <span className="text-[10px] text-amber-600 font-normal ml-1">
+                            ({p.returnedQty} ret.)
+                          </span>
+                        )}
+                      </span>
                       <span className="text-[10px] text-emerald-600 font-semibold">
                         +{settings.currency}
-                        {p.profit.toFixed(2)} profit
+                        {p.netProfit.toFixed(2)} profit
                       </span>
                     </div>
                   </div>

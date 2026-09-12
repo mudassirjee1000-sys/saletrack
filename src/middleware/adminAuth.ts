@@ -37,11 +37,17 @@ export const requireAdmin = async (
     });
   }
 
-  const token = authHeader.split('Bearer ')[1];
+  const token = authHeader.split('Bearer ')[1]?.trim();
+  if (!token) {
+    return res.status(401).json({
+      error: 'Unauthorized: Bearer token is empty.',
+    });
+  }
+
   const user = await verifyAuthToken(token);
   if (!user) {
     return res.status(401).json({
-      error: 'Unauthorized: Invalid authentication session.',
+      error: 'Unauthorized: Invalid or unverified authentication session.',
     });
   }
 

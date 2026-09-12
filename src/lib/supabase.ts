@@ -42,6 +42,9 @@ export function isValidSupabaseAnonKey(key: string): boolean {
   return true;
 }
 
+export const DEFAULT_SUPABASE_URL = "https://lrqmsmuqfukxtkkvefwt.supabase.co";
+export const DEFAULT_SUPABASE_ANON_KEY = "sb_publishable_oZ8DAGL5Xfwpe7_YEd8m4Q_E9axr6Ih";
+
 // Clean any deprecated customer localStorage keys
 try {
   if (typeof window !== "undefined" && window.localStorage) {
@@ -59,6 +62,20 @@ function getInitialConfig() {
 
   if (isValidSupabaseUrl(envUrl) && isValidSupabaseAnonKey(envKey)) {
     return { url: envUrl, anonKey: envKey };
+  }
+
+  // Check window.__SUPABASE_CONFIG__ injected by server
+  if (typeof window !== "undefined" && (window as any).__SUPABASE_CONFIG__) {
+    const winUrl = cleanConfigValue((window as any).__SUPABASE_CONFIG__.url);
+    const winKey = cleanConfigValue((window as any).__SUPABASE_CONFIG__.anonKey);
+    if (isValidSupabaseUrl(winUrl) && isValidSupabaseAnonKey(winKey)) {
+      return { url: winUrl, anonKey: winKey };
+    }
+  }
+
+  // Fallback to active project default credentials
+  if (isValidSupabaseUrl(DEFAULT_SUPABASE_URL) && isValidSupabaseAnonKey(DEFAULT_SUPABASE_ANON_KEY)) {
+    return { url: DEFAULT_SUPABASE_URL, anonKey: DEFAULT_SUPABASE_ANON_KEY };
   }
 
   return { url: "", anonKey: "" };
@@ -80,7 +97,7 @@ function initClient(url: string, anonKey: string): SupabaseClient | null {
       auth: {
         autoRefreshToken: true,
         persistSession: true,
-        detectSessionInUrl: true,
+        detectSessionInUrl: false,
         flowType: "pkce",
         storage: typeof window !== "undefined" ? window.localStorage : undefined,
       },
@@ -110,9 +127,10 @@ export function getSupabaseConfig() {
 export function getSupabase(): SupabaseClient {
   if (!clientInstance) {
     if (!currentConfig.url || !currentConfig.anonKey) {
-      throw new Error(
-        "Supabase is not configured. Please supply VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in environment variables."
-      );
+      currentConfig = {
+        url: DEFAULT_SUPABASE_URL,
+        anonKey: DEFAULT_SUPABASE_ANON_KEY,
+      };
     }
     clientInstance = initClient(currentConfig.url, currentConfig.anonKey);
     if (!clientInstance) {
@@ -131,6 +149,17 @@ export async function ensureSupabaseInitialized(): Promise<boolean> {
     return true;
   }
 
+  if (!clientInstance) {
+    if (!currentConfig.url || !currentConfig.anonKey) {
+      currentConfig = {
+        url: DEFAULT_SUPABASE_URL,
+        anonKey: DEFAULT_SUPABASE_ANON_KEY,
+      };
+    }
+    clientInstance = initClient(currentConfig.url, currentConfig.anonKey);
+    if (clientInstance) return true;
+  }
+
   if (initPromise) {
     return initPromise;
   }
@@ -146,7 +175,12 @@ export async function ensureSupabaseInitialized(): Promise<boolean> {
     } catch (err) {
       console.warn("Could not load Supabase config from server:", err);
     }
-    return false;
+
+    if (!clientInstance) {
+      currentConfig = { url: DEFAULT_SUPABASE_URL, anonKey: DEFAULT_SUPABASE_ANON_KEY };
+      clientInstance = initClient(currentConfig.url, currentConfig.anonKey);
+    }
+    return Boolean(clientInstance);
   })();
 
   return initPromise;

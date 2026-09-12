@@ -1,5 +1,6 @@
 import React from "react";
-import { Product, Sale, Expense, Customer, ShopSettings, ActiveTab } from "../types";
+import { Product, Sale, Expense, Customer, ShopSettings, ActiveTab, SaleReturn } from "../types";
+import { calculateAccountingMetrics } from "../utils/calculations";
 import {
   TrendingUp,
   DollarSign,
@@ -19,6 +20,7 @@ import {
 interface DashboardProps {
   products: Product[];
   sales: Sale[];
+  saleReturns?: SaleReturn[];
   expenses: Expense[];
   customers: Customer[];
   settings: ShopSettings;
@@ -35,6 +37,7 @@ interface DashboardProps {
 export const Dashboard: React.FC<DashboardProps> = ({
   products,
   sales,
+  saleReturns = [],
   expenses,
   customers,
   settings,
@@ -48,6 +51,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onQuickAddExpense,
 }) => {
   const safeSales = sales || [];
+  const safeSaleReturns = saleReturns || [];
   const safeProducts = products || [];
   const safeExpenses = expenses || [];
   const safeCustomers = customers || [];
@@ -55,19 +59,19 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   const todayStr = new Date().toISOString().slice(0, 10);
 
-  // Today's Sales
+  // Filter today's records
   const todaySalesList = safeSales.filter((s) => s && s.date && s.date.startsWith(todayStr));
-  const todaySalesAmount = todaySalesList.reduce((sum, s) => sum + (s.total || 0), 0);
-
-  // Today's Gross Profit from today's sales
-  const todayGrossProfit = todaySalesList.reduce((sum, s) => sum + (s.profit || 0), 0);
-
-  // Today's Expenses
+  const todayReturnsList = safeSaleReturns.filter((r) => r && r.date && r.date.startsWith(todayStr));
   const todayExpensesList = safeExpenses.filter((e) => e && e.date === todayStr);
-  const todayExpensesAmount = todayExpensesList.reduce((sum, e) => sum + (e.amount || 0), 0);
 
-  // Today's Net Profit
-  const todayNetProfit = todayGrossProfit - todayExpensesAmount;
+  // Accounting accuracy with returns, refunded revenue, and COGS adjustment
+  const todayMetrics = calculateAccountingMetrics(todaySalesList, todayExpensesList, todayReturnsList);
+  const todaySalesAmount = todayMetrics.totalSales; // Net sales revenue
+  const todayGrossSales = todayMetrics.grossSales;
+  const todayRefunds = todayMetrics.totalRefunds;
+  const todayGrossProfit = todayMetrics.grossProfit;
+  const todayExpensesAmount = todayMetrics.operatingExpenses;
+  const todayNetProfit = todayMetrics.netProfit;
 
   // Products and Low stock
   const totalProducts = safeProducts.length;
@@ -94,10 +98,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   // AI summary snippet
   const aiSnippet =
-    todaySalesAmount > 0
-      ? `Today's revenue is ${currency}${todaySalesAmount.toFixed(
+    todaySalesAmount > 0 || todayGrossSales > 0
+      ? `Today's net revenue is ${currency}${todaySalesAmount.toFixed(
           2
-        )} with ${todaySalesList.length} transaction(s). ${
+        )}${todayRefunds > 0 ? ` (after ${currency}${todayRefunds.toFixed(2)} in refunds)` : ""} with ${todaySalesList.length} transaction(s). ${
           lowStockProducts.length > 0
             ? `${lowStockProducts.length} items need restock.`
             : "Inventory levels are healthy."
@@ -190,10 +194,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
               {todaySalesList.length} sales
             </span>
           </div>
-          <p className="text-xs text-slate-500 mt-2 font-medium">
-            Gross profit: {settings.currency}
-            {todayGrossProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          </p>
+          <div className="flex items-center justify-between text-xs text-slate-500 mt-2 font-medium">
+            <span>
+              Gross profit: {settings.currency}
+              {todayGrossProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </span>
+            {todayRefunds > 0 && (
+              <span className="text-[11px] text-amber-600 font-bold bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                -{settings.currency}{todayRefunds.toFixed(2)} ref.
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Expenses */}
@@ -402,11 +413,33 @@ export const Dashboard: React.FC<DashboardProps> = ({
                           {totalQty}
                         </td>
                         <td className="px-5 py-3.5 text-right font-bold text-slate-800 text-xs">
-                          {settings.currency}
-                          {sale.total.toFixed(2)}
+                          {sale.refundedAmount && sale.refundedAmount > 0 ? (
+                            <div>
+                              <span className="text-slate-900 block">
+                                {settings.currency}
+                                {Math.max(0, sale.total - sale.refundedAmount).toFixed(2)}
+                              </span>
+                              <span className="text-[10px] text-slate-400 line-through">
+                                {settings.currency}{sale.total.toFixed(2)}
+                              </span>
+                            </div>
+                          ) : (
+                            <span>
+                              {settings.currency}
+                              {sale.total.toFixed(2)}
+                            </span>
+                          )}
                         </td>
                         <td className="px-4 py-3.5 text-center">
-                          {sale.paymentType === "cash" ? (
+                          {sale.status === "refunded" ? (
+                            <span className="px-2 py-0.5 bg-rose-100 text-rose-700 text-[10px] rounded-full uppercase font-bold tracking-wider">
+                              Refunded
+                            </span>
+                          ) : sale.status === "partially_refunded" ? (
+                            <span className="px-2 py-0.5 bg-amber-100 text-amber-800 text-[10px] rounded-full uppercase font-bold tracking-wider">
+                              Part. Refund
+                            </span>
+                          ) : sale.paymentType === "cash" ? (
                             <span className="px-2 py-0.5 bg-green-100 text-green-700 text-[10px] rounded-full uppercase font-bold tracking-wider">
                               Paid
                             </span>

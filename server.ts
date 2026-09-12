@@ -6,7 +6,6 @@ import { GoogleGenAI } from "@google/genai";
 import { requireAuth, AuthRequest } from "./src/middleware/auth.ts";
 import { requireAdmin, AdminAuthRequest } from "./src/middleware/adminAuth.ts";
 import { getOrCreateUser } from "./src/db/users.ts";
-import { getUserData, syncUserData } from "./src/db/queries.ts";
 import {
   getAdminOverviewMetrics,
   getBusinessesList,
@@ -32,8 +31,14 @@ async function startServer() {
 
   // Client Supabase Configuration Discovery (Public Anon Key only, never service_role)
   app.get("/api/config", (_req, res) => {
-    const rawUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "";
-    const rawAnonKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || "";
+    const rawUrl =
+      process.env.VITE_SUPABASE_URL ||
+      process.env.SUPABASE_URL ||
+      "https://lrqmsmuqfukxtkkvefwt.supabase.co";
+    const rawAnonKey =
+      process.env.VITE_SUPABASE_ANON_KEY ||
+      process.env.SUPABASE_ANON_KEY ||
+      "sb_publishable_oZ8DAGL5Xfwpe7_YEd8m4Q_E9axr6Ih";
 
     const cleanUrl = rawUrl.trim().replace(/^["']|["']$/g, "");
     const cleanAnonKey = rawAnonKey.trim().replace(/^["']|["']$/g, "");
@@ -239,37 +244,16 @@ async function startServer() {
     }
   });
 
-  // Fetch all user data from Cloud SQL
-  app.get("/api/data", requireAuth, async (req: AuthRequest, res) => {
-    try {
-      const uid = req.user?.uid;
-      if (!uid) {
-        return res.status(401).json({ error: "Unauthorized: Missing user identity" });
-      }
+  // =========================================================================
+  // DEPRECATED BUSINESS DATA ENDPOINTS
+  // Supabase is the single authoritative persistent database for all business data.
+  // Duplicate persistence to Cloud SQL / Drizzle is deprecated.
+  // =========================================================================
 
-      const data = await getUserData(uid);
-      res.json({ success: true, data });
-    } catch (error: any) {
-      console.error("Fetch data error:", error);
-      res.status(500).json({ error: error.message || "Failed to load database records." });
-    }
-  });
-
-  // Save/Sync user data to Cloud SQL
-  app.post("/api/data", requireAuth, async (req: AuthRequest, res) => {
-    try {
-      const uid = req.user?.uid;
-      if (!uid) {
-        return res.status(401).json({ error: "Unauthorized: Missing user identity" });
-      }
-
-      const payload = req.body || {};
-      await syncUserData(uid, payload);
-      res.json({ success: true, message: "Records successfully persisted to Cloud SQL." });
-    } catch (error: any) {
-      console.error("Sync data error:", error);
-      res.status(500).json({ error: error.message || "Failed to save records to database." });
-    }
+  app.all(["/api/data", "/api/settings", "/api/sales", "/api/sales/return"], (_req, res) => {
+    res.status(410).json({
+      error: "Deprecated: Supabase is the single authoritative persistent database for business records.",
+    });
   });
 
   // Customer Email Receipt Endpoint (Secure server-side proxy)

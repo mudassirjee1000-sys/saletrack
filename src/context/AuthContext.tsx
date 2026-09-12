@@ -13,69 +13,6 @@ import {
 } from "../services/supabaseService";
 import { clearAllLocalData } from "../storage";
 
-const LOCAL_ACTIVE_USER_KEY = "saletrack_active_user";
-const LOCAL_USERS_REGISTRY_KEY = "saletrack_users_registry";
-
-interface StoredLocalUser {
-  id: string;
-  email: string;
-  passwordHash: string;
-  name: string;
-}
-
-function getStoredUsers(): StoredLocalUser[] {
-  try {
-    if (typeof window !== "undefined" && window.localStorage) {
-      const raw = window.localStorage.getItem(LOCAL_USERS_REGISTRY_KEY);
-      if (raw) return JSON.parse(raw);
-    }
-  } catch {}
-  return [];
-}
-
-function saveStoredUser(u: StoredLocalUser): void {
-  try {
-    if (typeof window !== "undefined" && window.localStorage) {
-      const all = getStoredUsers().filter((x) => x.email.toLowerCase() !== u.email.toLowerCase());
-      all.push(u);
-      window.localStorage.setItem(LOCAL_USERS_REGISTRY_KEY, JSON.stringify(all));
-    }
-  } catch {}
-}
-
-function getLocalActiveUser(): { id: string; email: string; name: string } | null {
-  try {
-    if (typeof window !== "undefined" && window.localStorage) {
-      const raw = window.localStorage.getItem(LOCAL_ACTIVE_USER_KEY);
-      if (raw) return JSON.parse(raw);
-    }
-  } catch {}
-  return null;
-}
-
-function setLocalActiveUser(user: { id: string; email: string; name: string } | null): void {
-  try {
-    if (typeof window !== "undefined" && window.localStorage) {
-      if (user) {
-        window.localStorage.setItem(LOCAL_ACTIVE_USER_KEY, JSON.stringify(user));
-      } else {
-        window.localStorage.removeItem(LOCAL_ACTIVE_USER_KEY);
-      }
-    }
-  } catch {}
-}
-
-function createSyntheticUser(id: string, email: string, name?: string): User {
-  return {
-    id,
-    app_metadata: { provider: "email" },
-    user_metadata: { full_name: name || email.split("@")[0] },
-    aud: "authenticated",
-    created_at: new Date().toISOString(),
-    email,
-  } as User;
-}
-
 interface AuthContextType {
   user: User | null;
   session: Session | null;
@@ -89,7 +26,6 @@ interface AuthContextType {
   oauthPopupUrl: string | null;
   clearOAuthError: () => void;
   signInWithGoogle: () => Promise<void>;
-  signInWithTestUser: (email?: string, name?: string) => Promise<void>;
   signUpWithEmail: (
     email: string,
     pass: string,
@@ -120,7 +56,6 @@ const AuthContext = createContext<AuthContextType>({
   oauthPopupUrl: null,
   clearOAuthError: () => {},
   signInWithGoogle: async () => {},
-  signInWithTestUser: async () => {},
   signUpWithEmail: async () => ({}),
   signInWithEmail: async () => ({}),
   resetPassword: async () => ({}),
@@ -167,6 +102,10 @@ function extractOAuthErrorFromUrl(): string | null {
 
   return null;
 }
+
+// Track processed OAuth authorization codes to guarantee single PKCE code exchange across renders/mounts
+const processedOAuthCodes = new Set<string>();
+let isExchangingOAuthCode = false;
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
@@ -230,17 +169,50 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         try {
           const sb = getSupabase();
 
-          // Check if OAuth code is in search query params (PKCE flow)
+          // Check if OAuth PKCE code is in search query params
+          // Handle the PKCE code manually, EXACTLY ONCE
           if (typeof window !== "undefined" && window.location.search) {
             const searchParams = new URLSearchParams(window.location.search);
             const authCode = searchParams.get("code");
-            if (authCode) {
+            if (authCode && !processedOAuthCodes.has(authCode) && !isExchangingOAuthCode) {
+              processedOAuthCodes.add(authCode);
+              isExchangingOAuthCode = true;
+
+              // Immediately remove the code from browser URL so subsequent renders/refreshes do not re-exchange
+              window.history.replaceState({}, document.title, window.location.pathname);
+
               try {
-                await sb.auth.exchangeCodeForSession(authCode);
-              } catch (codeErr) {
-                console.warn("OAuth authorization code exchange notice:", codeErr);
+                const { data: exchangeData, error: exchangeErr } = await sb.auth.exchangeCodeForSession(authCode);
+                if (exchangeErr) {
+                  // Safe diagnostic logging: NEVER log access tokens, refresh tokens, secrets, or complete codes
+                  console.error("OAuth code exchange error:", {
+                    event: "exchangeCodeForSession_failed",
+                    message: exchangeErr.message,
+                    code: (exchangeErr as any).status || "UNKNOWN",
+                    currentOrigin: window.location.origin,
+                    hasCodeParam: true,
+                  });
+                  setOauthError(exchangeErr.message);
+                } else if (exchangeData?.session && isMounted) {
+                  setSession(exchangeData.session);
+                  const user = exchangeData.session.user;
+                  setUser(user);
+                  if (user) {
+                    await loadBusiness(user);
+                  }
+                }
+              } catch (codeErr: any) {
+                console.error("OAuth code exchange exception:", {
+                  event: "exchangeCodeForSession_exception",
+                  message: codeErr?.message || "Unknown error",
+                  currentOrigin: window.location.origin,
+                  hasCodeParam: true,
+                });
+                if (isMounted) {
+                  setOauthError(codeErr?.message || "Failed to exchange authorization code");
+                }
               } finally {
-                window.history.replaceState({}, document.title, window.location.pathname);
+                isExchangingOAuthCode = false;
               }
             }
           }
@@ -284,7 +256,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               setUser(null);
               setSession(null);
               setBusiness(null);
-              setLocalActiveUser(null);
               clearAllLocalData();
             }
           });
@@ -299,16 +270,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
 
-      // If Supabase is not configured or in local sandbox
-      const active = getLocalActiveUser();
-      if (active) {
-        const synUser = createSyntheticUser(active.id, active.email, active.name);
-        setUser(synUser);
-        await loadBusiness(synUser);
-      } else {
-        setUser(null);
-        setBusiness(null);
-      }
+      // No active Supabase session
+      setUser(null);
+      setBusiness(null);
 
       if (isMounted) setLoading(false);
     }
@@ -325,32 +289,52 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setOauthError(null);
     setOauthPopupUrl(null);
 
-    if (isConfigured) {
-      const sb = getSupabase();
-      // Ensure redirect URI is always dynamically derived from current application origin with trailing slash
-      const currentOrigin = typeof window !== "undefined" ? window.location.origin : "";
-      const redirectUrl = currentOrigin ? `${currentOrigin}/` : undefined;
+    let configured = isConfigured || isSupabaseConfigured();
+    if (!configured) {
+      configured = await ensureSupabaseInitialized();
+      if (configured) {
+        setIsConfigured(true);
+        setSupabaseConfig(getSupabaseConfig());
+      }
+    }
 
+    if (!configured) {
+      try {
+        getSupabase();
+        configured = true;
+        setIsConfigured(true);
+        setSupabaseConfig(getSupabaseConfig());
+      } catch (err) {
+        console.warn("Could not lazily get Supabase client:", err);
+      }
+    }
+
+    if (configured) {
+      const sb = getSupabase();
+      const currentOrigin = typeof window !== "undefined" ? window.location.origin : "";
       const isIframe = typeof window !== "undefined" && window.self !== window.top;
 
-      // Note on iframes: Google OAuth strictly prohibits rendering inside an iframe (X-Frame-Options: DENY).
-      // If triggered inside an iframe (like AI Studio preview), Supabase's default window.location.assign
-      // causes Google to return "403. That's an error. We're sorry, but you do not have access to this page."
-      // By using skipBrowserRedirect and opening in a top-level window/tab, we break out of the iframe!
       const { data, error } = await sb.auth.signInWithOAuth({
         provider: "google",
         options: {
-          redirectTo: redirectUrl,
+          redirectTo: `${currentOrigin}/`,
           skipBrowserRedirect: isIframe,
           queryParams: {
-            access_type: "offline",
-            prompt: "consent",
+            prompt: "select_account",
           },
         },
       });
 
       if (error) {
-        console.error("Supabase Google OAuth initialization failed:", error);
+        // Safe diagnostic logging: NEVER log tokens, secrets, passwords, or complete codes
+        console.error("Supabase Google OAuth initialization failed:", {
+          event: "signInWithOAuth_failed",
+          message: error.message,
+          code: (error as any).status || "UNKNOWN",
+          currentOrigin,
+          hasCodeParam: false,
+        });
+        setOauthError(error.message);
         throw error;
       }
 
@@ -369,67 +353,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     throw new Error(
-      "Supabase authentication is not configured. Please ensure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are set."
+      "Supabase configuration is missing. Please ensure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are set."
     );
-  };
-
-  // Option A.2 — Instant 1-Click Test Sign In (bypasses Google Cloud Console testing restrictions)
-  const signInWithTestUser = async (userEmail = "mudassirjee1000@gmail.com", userName = "Mudassir") => {
-    setOauthError(null);
-    setOauthPopupUrl(null);
-    setLoading(true);
-
-    const email = userEmail.trim().toLowerCase();
-    const name = userName.trim();
-
-    try {
-      let existingUser = getStoredUsers().find((u) => u.email.toLowerCase() === email);
-      let userId = existingUser ? existingUser.id : "usr_" + crypto.randomUUID().slice(0, 8);
-
-      if (!existingUser) {
-        saveStoredUser({ id: userId, email, passwordHash: "test_mode_auth", name });
-      }
-
-      const synUser = createSyntheticUser(userId, email, name);
-      setUser(synUser);
-      setLocalActiveUser({ id: userId, email, name });
-
-      let biz: Business | null = null;
-      try {
-        biz = await fetchBusinessForUser(userId);
-      } catch (e) {
-        console.warn("Could not fetch remote business for test user:", e);
-      }
-
-      if (!biz) {
-        try {
-          biz = await createBusinessInSupabase({
-            owner_user_id: userId,
-            business_name: "Mudassir Retail Shop",
-            owner_name: name,
-            country: "United States",
-            currency: "USD",
-            currency_symbol: "$",
-            phone_country_code: "+1",
-            phone_number: "5551234567",
-            phone_e164: "+15551234567",
-          });
-        } catch (err) {
-          console.warn("Could not provision remote business for test user:", err);
-        }
-      }
-
-      setBusiness(biz);
-    } finally {
-      setLoading(false);
-    }
   };
 
   // Option B — Email + Password Sign Up
   const signUpWithEmail = async (email: string, pass: string, shopName?: string) => {
     const cleanEmail = email.trim().toLowerCase();
 
-    if (isConfigured) {
+    let configured = isConfigured || isSupabaseConfigured();
+    if (!configured) {
+      configured = await ensureSupabaseInitialized();
+      if (configured) {
+        setIsConfigured(true);
+        setSupabaseConfig(getSupabaseConfig());
+      }
+    }
+
+    if (configured) {
       const sb = getSupabase();
       try {
         const { data, error } = await sb.auth.signUp({
@@ -470,47 +411,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }
 
-    // Direct registration in sandbox mode
-    const existing = getStoredUsers().find((u) => u.email === cleanEmail);
-    if (existing) {
-      return { error: "An account with this email already exists. Please sign in." };
-    }
-
-    const userId = "usr_" + crypto.randomUUID().slice(0, 12);
-    const storeName = shopName || `${cleanEmail.split("@")[0]}'s Store`;
-
-    saveStoredUser({
-      id: userId,
-      email: cleanEmail,
-      passwordHash: pass,
-      name: storeName,
-    });
-
-    const synUser = createSyntheticUser(userId, cleanEmail, storeName);
-    setUser(synUser);
-    setLocalActiveUser({ id: userId, email: cleanEmail, name: storeName });
-
-    const newBiz = await createBusinessInSupabase({
-      owner_user_id: userId,
-      business_name: storeName,
-      owner_name: storeName,
-      country: "United States",
-      currency: "USD",
-      currency_symbol: "$",
-      phone_country_code: "+1",
-      phone_number: "5551234567",
-      phone_e164: "+15551234567",
-    });
-
-    setBusiness(newBiz);
-    return {};
+    return { error: "Authentication service is unavailable. Please check your network connection and configuration." };
   };
 
   // Option B — Email + Password Sign In
   const signInWithEmail = async (email: string, pass: string) => {
     const cleanEmail = email.trim().toLowerCase();
 
-    if (isConfigured) {
+    let configured = isConfigured || isSupabaseConfigured();
+    if (!configured) {
+      configured = await ensureSupabaseInitialized();
+      if (configured) {
+        setIsConfigured(true);
+        setSupabaseConfig(getSupabaseConfig());
+      }
+    }
+
+    if (configured) {
       const sb = getSupabase();
       try {
         const { data, error } = await sb.auth.signInWithPassword({
@@ -530,24 +447,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }
 
-    // Direct sign-in in sandbox mode
-    const existing = getStoredUsers().find((u) => u.email === cleanEmail);
-    if (!existing || existing.passwordHash !== pass) {
-      return { error: "Invalid email or password. Please try again or create an account." };
-    }
-
-    const synUser = createSyntheticUser(existing.id, existing.email, existing.name);
-    setUser(synUser);
-    setLocalActiveUser({ id: existing.id, email: existing.email, name: existing.name });
-
-    await loadBusiness(synUser);
-    return {};
+    return { error: "Authentication service is unavailable. Please check your network connection and configuration." };
   };
 
   // Reset Forgotten Password
   const resetPassword = async (email: string) => {
     const cleanEmail = email.trim().toLowerCase();
-    if (isConfigured) {
+
+    let configured = isConfigured || isSupabaseConfigured();
+    if (!configured) {
+      configured = await ensureSupabaseInitialized();
+      if (configured) {
+        setIsConfigured(true);
+        setSupabaseConfig(getSupabaseConfig());
+      }
+    }
+
+    if (configured) {
       const sb = getSupabase();
       try {
         const { error } = await sb.auth.resetPasswordForEmail(cleanEmail, {
@@ -560,13 +476,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }
 
-    // Friendly confirmation in sandbox mode
-    return { success: true };
+    return { error: "Authentication service is unavailable. Please check your connection." };
   };
 
   // Update Password for Authenticated User
   const updatePassword = async (newPass: string) => {
-    if (isConfigured) {
+    let configured = isConfigured || isSupabaseConfigured();
+    if (configured) {
       const sb = getSupabase();
       try {
         const { error } = await sb.auth.updateUser({ password: newPass });
@@ -577,15 +493,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }
 
-    if (user?.email) {
-      const all = getStoredUsers();
-      const match = all.find((u) => u.email === user.email);
-      if (match) {
-        match.passwordHash = newPass;
-        saveStoredUser(match);
-      }
-    }
-    return { success: true };
+    return { error: "Authentication service is unavailable." };
   };
 
   // Sign Out & Purge In-Memory State
@@ -601,7 +509,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(null);
       setSession(null);
       setBusiness(null);
-      setLocalActiveUser(null);
       clearAllLocalData();
       if (typeof window !== "undefined") {
         window.history.pushState(null, "", "/login");
@@ -650,7 +557,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         oauthPopupUrl,
         clearOAuthError,
         signInWithGoogle,
-        signInWithTestUser,
         signUpWithEmail,
         signInWithEmail,
         resetPassword,
@@ -660,7 +566,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         refreshBusiness,
         setupCredentials,
         token: session?.access_token || null,
-        getIdToken: async () => session?.access_token || null,
+        getIdToken: async () => {
+          if (session?.access_token) return session.access_token;
+          try {
+            if (isSupabaseConfigured()) {
+              const sb = getSupabase();
+              const { data } = await sb.auth.getSession();
+              return data.session?.access_token || null;
+            }
+          } catch {}
+          return null;
+        },
       }}
     >
       {children}
