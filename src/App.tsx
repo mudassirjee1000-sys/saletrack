@@ -420,7 +420,8 @@ export default function App() {
                 if (c.id === existing.id) {
                   const updatedCust = {
                     ...c,
-                    totalCredit: c.totalCredit + creditRemaining,
+                    totalCredit: c.totalCredit + recordedSale.total,
+                    totalPaid: c.totalPaid + recordedSale.paid,
                     remaining: c.remaining + creditRemaining,
                   };
                   upsertCustomerInSupabase(business.id, updatedCust).catch(console.error);
@@ -435,7 +436,7 @@ export default function App() {
                 name: recordedSale.customerName,
                 phone: recordedSale.customerPhone || "",
                 email: recordedSale.customerEmail || "",
-                totalCredit: creditRemaining,
+                totalCredit: recordedSale.total,
                 totalPaid: recordedSale.paid,
                 remaining: creditRemaining,
                 payments: [],
@@ -451,16 +452,21 @@ export default function App() {
         if (settings.autoEmailReceipt) {
           const recipient = recordedSale.customerEmail || customers.find((c) => c.id === recordedSale.customerId)?.email;
           if (recipient && recipient.includes("@")) {
-            fetch("/api/email/send-receipt", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                to: recipient,
-                customerName: recordedSale.customerName,
-                sale: recordedSale,
-                settings,
-              }),
-            }).catch((err) => console.warn("Auto email receipt notice:", err));
+            getIdToken().then((authToken) => {
+              fetch("/api/email/send-receipt", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+                },
+                body: JSON.stringify({
+                  to: recipient,
+                  customerName: recordedSale.customerName,
+                  sale: recordedSale,
+                  settings,
+                }),
+              }).catch((err) => console.warn("Auto email receipt notice:", err));
+            });
           }
         }
 

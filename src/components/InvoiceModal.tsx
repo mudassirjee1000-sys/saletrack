@@ -1,5 +1,6 @@
-import React, { useRef } from "react";
+import React, { useRef, useState } from "react";
 import { Sale, ShopSettings } from "../types";
+import { getAuthHeaders } from "../lib/supabase";
 import {
   Printer,
   Download,
@@ -9,6 +10,8 @@ import {
   Clock,
   MessageSquare,
   RotateCcw,
+  Mail,
+  Loader2,
 } from "lucide-react";
 
 interface InvoiceModalProps {
@@ -26,8 +29,51 @@ export const InvoiceModal: React.FC<InvoiceModalProps> = ({
 }) => {
   const receiptRef = useRef<HTMLDivElement>(null);
   const [copiedNotice, setCopiedNotice] = React.useState(false);
+  const [showEmailInput, setShowEmailInput] = useState(false);
+  const [emailRecipient, setEmailRecipient] = useState(sale?.customerEmail || "");
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailStatus, setEmailStatus] = useState<{ success?: boolean; message?: string } | null>(null);
 
   if (!sale) return null;
+
+  const handleSendEmail = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const recipient = (emailRecipient || sale.customerEmail || settings.email || "").trim();
+    if (!recipient || !recipient.includes("@")) {
+      setShowEmailInput(true);
+      setEmailStatus({ success: false, message: "Please enter a valid email address." });
+      return;
+    }
+    setEmailSending(true);
+    setEmailStatus(null);
+    try {
+      const authHeaders = await getAuthHeaders();
+      const res = await fetch("/api/email/send-receipt", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders,
+        },
+        body: JSON.stringify({
+          to: recipient,
+          customerName: sale.customerName,
+          sale,
+          settings,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setEmailStatus({ success: true, message: `Receipt sent to ${recipient}` });
+        setTimeout(() => setShowEmailInput(false), 3000);
+      } else {
+        setEmailStatus({ success: false, message: data.error || "Failed to send email" });
+      }
+    } catch {
+      setEmailStatus({ success: false, message: "Network error sending email receipt" });
+    } finally {
+      setEmailSending(false);
+    }
+  };
 
   const handlePrint = () => {
     window.print();
@@ -364,6 +410,52 @@ ${settings.invoiceFooter || "Thank you for your business!"}`;
             )}
           </div>
 
+          {/* Email Drawer / Notice */}
+          {showEmailInput && (
+            <form onSubmit={handleSendEmail} className="mt-4 p-3 bg-blue-50/70 border border-blue-200 rounded-xl space-y-2 text-left">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-700">Email Customer Receipt</span>
+                <button
+                  type="button"
+                  onClick={() => setShowEmailInput(false)}
+                  className="text-slate-400 hover:text-slate-600 text-xs"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="email"
+                  required
+                  placeholder="customer@example.com"
+                  value={emailRecipient}
+                  onChange={(e) => setEmailRecipient(e.target.value)}
+                  className="flex-1 px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+                />
+                <button
+                  type="submit"
+                  disabled={emailSending}
+                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center gap-1"
+                >
+                  {emailSending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Mail className="w-3 h-3" />}
+                  <span>Send</span>
+                </button>
+              </div>
+            </form>
+          )}
+
+          {emailStatus && (
+            <div
+              className={`mt-2 p-2 rounded-lg text-xs font-medium text-center ${
+                emailStatus.success
+                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                  : "bg-rose-50 text-rose-700 border border-rose-200"
+              }`}
+            >
+              {emailStatus.message}
+            </div>
+          )}
+
           {/* Footer note */}
           <div className="text-center mt-6 pt-4 border-t border-dashed border-slate-200">
             <p className="text-xs text-slate-500 italic">{settings.invoiceFooter}</p>
@@ -374,11 +466,11 @@ ${settings.invoiceFooter || "Thank you for your business!"}`;
         </div>
 
         {/* Action Buttons */}
-        <div className="grid grid-cols-4 gap-2 p-3 bg-slate-50 border-t border-slate-100">
+        <div className="grid grid-cols-5 gap-1.5 p-3 bg-slate-50 border-t border-slate-100">
           <button
             id="print-invoice-btn"
             onClick={handlePrint}
-            className="flex flex-col items-center justify-center gap-1 py-2 px-1 bg-white border border-slate-200 text-slate-700 rounded-xl font-semibold text-[11px] hover:bg-slate-100 active:scale-95 transition shadow-xs"
+            className="flex flex-col items-center justify-center gap-1 py-2 px-1 bg-white border border-slate-200 text-slate-700 rounded-xl font-semibold text-[10px] sm:text-[11px] hover:bg-slate-100 active:scale-95 transition shadow-xs"
           >
             <Printer className="w-4 h-4 text-slate-500" />
             <span>Print</span>
@@ -386,7 +478,7 @@ ${settings.invoiceFooter || "Thank you for your business!"}`;
           <button
             id="download-invoice-btn"
             onClick={handleDownload}
-            className="flex flex-col items-center justify-center gap-1 py-2 px-1 bg-white border border-slate-200 text-slate-700 rounded-xl font-semibold text-[11px] hover:bg-slate-100 active:scale-95 transition shadow-xs"
+            className="flex flex-col items-center justify-center gap-1 py-2 px-1 bg-white border border-slate-200 text-slate-700 rounded-xl font-semibold text-[10px] sm:text-[11px] hover:bg-slate-100 active:scale-95 transition shadow-xs"
           >
             <Download className="w-4 h-4 text-slate-500" />
             <span>Save HTML</span>
@@ -394,10 +486,24 @@ ${settings.invoiceFooter || "Thank you for your business!"}`;
           <button
             id="whatsapp-invoice-btn"
             onClick={handleShareWhatsApp}
-            className="flex flex-col items-center justify-center gap-1 py-2 px-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-semibold text-[11px] active:scale-95 transition shadow-xs"
+            className="flex flex-col items-center justify-center gap-1 py-2 px-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-semibold text-[10px] sm:text-[11px] active:scale-95 transition shadow-xs"
           >
             <MessageSquare className="w-4 h-4" />
             <span>WhatsApp</span>
+          </button>
+          <button
+            id="email-invoice-btn"
+            onClick={() => {
+              if (sale.customerEmail) {
+                handleSendEmail();
+              } else {
+                setShowEmailInput(!showEmailInput);
+              }
+            }}
+            className="flex flex-col items-center justify-center gap-1 py-2 px-1 bg-white border border-slate-200 text-slate-700 rounded-xl font-semibold text-[10px] sm:text-[11px] hover:bg-slate-100 active:scale-95 transition shadow-xs"
+          >
+            <Mail className="w-4 h-4 text-slate-500" />
+            <span>Email</span>
           </button>
           {onOpenReturn && !isRefunded ? (
             <button
@@ -405,7 +511,7 @@ ${settings.invoiceFooter || "Thank you for your business!"}`;
                 onClose();
                 onOpenReturn(sale);
               }}
-              className="flex flex-col items-center justify-center gap-1 py-2 px-1 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-semibold text-[11px] active:scale-95 transition shadow-xs"
+              className="flex flex-col items-center justify-center gap-1 py-2 px-1 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-semibold text-[10px] sm:text-[11px] active:scale-95 transition shadow-xs"
             >
               <RotateCcw className="w-4 h-4" />
               <span>Refund</span>
@@ -414,7 +520,7 @@ ${settings.invoiceFooter || "Thank you for your business!"}`;
             <button
               id="share-invoice-btn"
               onClick={handleShare}
-              className={`flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-xl font-semibold text-[11px] active:scale-95 transition shadow-xs text-white ${
+              className={`flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-xl font-semibold text-[10px] sm:text-[11px] active:scale-95 transition shadow-xs text-white ${
                 copiedNotice ? "bg-emerald-700 hover:bg-emerald-800" : "bg-blue-600 hover:bg-blue-700"
               }`}
             >

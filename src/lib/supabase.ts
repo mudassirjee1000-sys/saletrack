@@ -207,4 +207,20 @@ export async function fetchServerConfig(): Promise<{ url: string; anonKey: strin
   return null;
 }
 
+export async function getAuthHeaders(): Promise<Record<string, string>> {
+  try {
+    const sb = getSupabase();
+    const { data } = await sb.auth.getSession();
+    const token = data?.session?.access_token;
+    if (token) {
+      return {
+        Authorization: `Bearer ${token}`,
+      };
+    }
+  } catch {
+    // Ignore error and return empty headers
+  }
+  return {};
+}
+
 export const supabase = clientInstance;

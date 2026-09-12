@@ -62,7 +62,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   // Filter today's records
   const todaySalesList = safeSales.filter((s) => s && s.date && s.date.startsWith(todayStr));
   const todayReturnsList = safeSaleReturns.filter((r) => r && r.date && r.date.startsWith(todayStr));
-  const todayExpensesList = safeExpenses.filter((e) => e && e.date === todayStr);
+  const todayExpensesList = safeExpenses.filter((e) => e && e.date && e.date.startsWith(todayStr));
 
   // Accounting accuracy with returns, refunded revenue, and COGS adjustment
   const todayMetrics = calculateAccountingMetrics(todaySalesList, todayExpensesList, todayReturnsList);

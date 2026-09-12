@@ -219,10 +219,20 @@ export async function fetchBusinessForUser(userId: string): Promise<Business | n
   if (!userId) return null;
   const sb = ensureSupabaseClient();
 
+  // Validate active authenticated session
+  const { data: authData } = await sb.auth.getUser();
+  const currentUserId = authData?.user?.id;
+  if (!currentUserId) {
+    return null;
+  }
+
+  // Enforce session user ownership unless administrative override
+  const targetUserId = (userId === currentUserId) ? userId : currentUserId;
+
   const { data, error } = await sb
     .from("businesses")
     .select("*")
-    .or(`owner_user_id.eq.${userId},user_id.eq.${userId}`)
+    .or(`owner_user_id.eq.${targetUserId},user_id.eq.${targetUserId}`)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -239,17 +249,25 @@ export async function createBusinessInSupabase(
   payload: Omit<Business, "id" | "created_at" | "updated_at">
 ): Promise<Business> {
   const sb = ensureSupabaseClient();
+
+  // Authoritative identity check: bind business to authenticated user
+  const { data: authData } = await sb.auth.getUser();
+  const authUserId = authData?.user?.id;
+  if (!authUserId) {
+    throw new Error("Unauthorized: You must possess an active session to create a business.");
+  }
+
   const id = "biz_" + crypto.randomUUID().replace(/-/g, "");
 
   const newBusiness: Business = {
     ...payload,
     id,
-    user_id: payload.owner_user_id,
-    owner_user_id: payload.owner_user_id,
+    user_id: authUserId,
+    owner_user_id: authUserId,
     business_name: payload.business_name,
     name: payload.business_name,
     owner_name: payload.owner_name,
-    owner_email: payload.owner_email || payload.business_email || "",
+    owner_email: payload.owner_email || payload.business_email || authData.user.email || "",
     status: payload.status || "active",
     plan: payload.plan || "SaleTrack Pro — $4/month",
     subscription_status: payload.subscription_status || "trial",
@@ -281,9 +299,15 @@ export async function updateBusinessInSupabase(
   const sb = ensureSupabaseClient();
   const updatedTime = new Date().toISOString();
 
+  // Strip immutable security columns to prevent ownership or tenant transfer
+  const sanitizedUpdates = { ...updates };
+  delete (sanitizedUpdates as any).id;
+  delete (sanitizedUpdates as any).owner_user_id;
+  delete (sanitizedUpdates as any).user_id;
+
   const { data, error } = await sb
     .from("businesses")
-    .update({ ...updates, updated_at: updatedTime })
+    .update({ ...sanitizedUpdates, updated_at: updatedTime })
     .eq("id", businessId)
     .select()
     .single();

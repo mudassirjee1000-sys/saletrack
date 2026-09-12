@@ -257,7 +257,7 @@ async function startServer() {
   });
 
   // Customer Email Receipt Endpoint (Secure server-side proxy)
-  app.post("/api/email/send-receipt", async (req, res) => {
+  app.post("/api/email/send-receipt", requireAuth, async (req: AuthRequest, res) => {
     try {
       const { to, customerName, sale, settings } = req.body;
 
@@ -309,7 +309,7 @@ async function startServer() {
   });
 
   // AI Business Assistant Analysis Endpoint
-  app.post("/api/ai/analyze", async (req, res) => {
+  app.post("/api/ai/analyze", requireAuth, async (req: AuthRequest, res) => {
     try {
       const { metrics, promptContext } = req.body;
 

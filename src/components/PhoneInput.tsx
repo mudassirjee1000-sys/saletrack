@@ -49,6 +49,14 @@ export const PhoneInput: React.FC<PhoneInputProps> = ({
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
+  // Sync selected country when initialCountryIso changes
+  useEffect(() => {
+    if (initialCountryIso) {
+      const country = findCountryByIso(initialCountryIso);
+      setSelectedCountry(country);
+    }
+  }, [initialCountryIso]);
+
   // Close dropdown on outside click
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {

@@ -72,7 +72,9 @@ export const Reports: React.FC<ReportsProps> = ({
 
   // Filter expenses within range
   const filteredExpenses = expenses.filter((e) => {
-    const eDate = new Date(`${e.date}T12:00:00`);
+    if (!e || !e.date) return false;
+    const rawDate = e.date.includes("T") ? e.date : `${e.date}T12:00:00`;
+    const eDate = new Date(rawDate);
     return !isNaN(eDate.getTime()) && eDate >= startDate && eDate <= endDate;
   });
 

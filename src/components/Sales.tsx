@@ -328,6 +328,8 @@ export const Sales: React.FC<SalesProps> = ({
         invoiceNum = `${prefix}${counter.toString().padStart(3, "0")}`;
       }
 
+      const totalCogs = cart.reduce((sum, item) => sum + item.purchasePrice * item.quantity, 0);
+
       const newSale: Sale = {
         id: "sale-" + Date.now() + "-" + Math.floor(1000 + Math.random() * 9000),
         transactionId,
@@ -345,6 +347,7 @@ export const Sales: React.FC<SalesProps> = ({
         taxName: settings.taxName || "Tax",
         total: grandTotal,
         profit: totalProfit - calculatedDiscount,
+        cogs: totalCogs,
         paid: paymentType === "cash" ? grandTotal : 0,
         refundedAmount: 0,
         status: paymentType === "cash" ? "completed" : "unpaid",

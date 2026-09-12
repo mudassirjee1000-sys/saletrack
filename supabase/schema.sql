@@ -542,41 +542,311 @@ CREATE INDEX IF NOT EXISTS idx_login_activity_user_id ON public.login_activity(u
 -- Check if current authenticated user has administrative privileges
 CREATE OR REPLACE FUNCTION public.is_admin()
 RETURNS BOOLEAN
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
 STABLE
 AS $$
-  SELECT (
-    (auth.jwt()->>'email' = 'mudassirjee1000@gmail.com')
-    OR EXISTS (
-      SELECT 1 FROM public.admin_users
-      WHERE (email = auth.jwt()->>'email' OR (uid IS NOT NULL AND uid = auth.uid()::text))
-        AND is_active = true
-    )
+DECLARE
+  jwt_email TEXT;
+  auth_uid TEXT;
+BEGIN
+  jwt_email := auth.jwt()->>'email';
+  auth_uid := auth.uid()::text;
+
+  IF jwt_email IS NULL AND auth_uid IS NULL THEN
+    RETURN FALSE;
+  END IF;
+
+  -- 1. Primary designated owner email check
+  IF jwt_email IS NOT NULL AND lower(trim(jwt_email)) = 'mudassirjee1000@gmail.com' THEN
+    RETURN TRUE;
+  END IF;
+
+  -- 2. Explicit admin_users table verification
+  RETURN EXISTS (
+    SELECT 1 FROM public.admin_users
+    WHERE is_active = true
+      AND (
+        (uid IS NOT NULL AND uid = auth_uid)
+        OR (jwt_email IS NOT NULL AND lower(email) = lower(trim(jwt_email)))
+      )
   );
+END;
 $$;
 
--- Check if current user is owner of a given business ID
+-- Check if current user is authorized to access a given business ID
 CREATE OR REPLACE FUNCTION public.can_access_business(bid TEXT)
 RETURNS BOOLEAN
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
 STABLE
 AS $$
-  SELECT (
-    public.is_admin()
-    OR EXISTS (
-      SELECT 1 FROM public.businesses
-      WHERE id = bid
-        AND (
-          owner_user_id = auth.uid()::text
-          OR (user_id IS NOT NULL AND user_id = auth.uid()::text)
-        )
-    )
+DECLARE
+  current_user_id TEXT;
+BEGIN
+  -- Strict input validation: deny if null, empty, or unauthenticated
+  IF bid IS NULL OR trim(bid) = '' THEN
+    RETURN FALSE;
+  END IF;
+
+  current_user_id := auth.uid()::text;
+  IF current_user_id IS NULL THEN
+    RETURN FALSE;
+  END IF;
+
+  -- Admin bypass
+  IF public.is_admin() THEN
+    RETURN TRUE;
+  END IF;
+
+  -- Verify direct business ownership / membership
+  RETURN EXISTS (
+    SELECT 1 FROM public.businesses
+    WHERE id = trim(bid)
+      AND (
+        owner_user_id = current_user_id
+        OR (user_id IS NOT NULL AND user_id = current_user_id)
+      )
   );
+END;
 $$;
+
+-- ==============================================================================
+-- MULTI-TENANT INTEGRITY & IMMUTABILITY TRIGGERS
+-- ==============================================================================
+
+-- Trigger Function: Prevent business_id changes (guarantees records can never be moved across tenants)
+CREATE OR REPLACE FUNCTION public.prevent_business_id_change()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    IF OLD.business_id IS NOT NULL AND NEW.business_id IS DISTINCT FROM OLD.business_id THEN
+        RAISE EXCEPTION 'Multi-tenant security violation: business_id is immutable and cannot be transferred to another business (old: %, new: %)', OLD.business_id, NEW.business_id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- Trigger Function: Prevent tampering with business ownership or primary key
+CREATE OR REPLACE FUNCTION public.prevent_business_owner_tampering()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    IF NOT public.is_admin() THEN
+        IF OLD.id IS NOT NULL AND NEW.id IS DISTINCT FROM OLD.id THEN
+            RAISE EXCEPTION 'Multi-tenant security violation: Business id is immutable.';
+        END IF;
+        IF OLD.owner_user_id IS NOT NULL AND NEW.owner_user_id IS DISTINCT FROM OLD.owner_user_id THEN
+            RAISE EXCEPTION 'Multi-tenant security violation: Business ownership is immutable and cannot be transferred.';
+        END IF;
+        IF OLD.user_id IS NOT NULL AND NEW.user_id IS DISTINCT FROM OLD.user_id THEN
+            RAISE EXCEPTION 'Multi-tenant security violation: Business user identity is immutable.';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- Trigger Function: Validate cross-table relationships to ensure all related entities belong to the same business
+CREATE OR REPLACE FUNCTION public.validate_tenant_references()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    -- 1. Validate customer_id belongs to the exact same business
+    IF TG_TABLE_NAME IN ('sales', 'sale_returns', 'invoices') AND NEW.customer_id IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.customers
+            WHERE id = NEW.customer_id AND business_id = NEW.business_id
+        ) THEN
+            RAISE EXCEPTION 'Multi-tenant integrity violation on %: Customer (%) does not belong to business (%)', TG_TABLE_NAME, NEW.customer_id, NEW.business_id;
+        END IF;
+    END IF;
+
+    -- 2. Validate product_id belongs to the exact same business (stock_movements)
+    IF TG_TABLE_NAME = 'stock_movements' AND NEW.product_id IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.products
+            WHERE id = NEW.product_id AND business_id = NEW.business_id
+        ) THEN
+            RAISE EXCEPTION 'Multi-tenant integrity violation on stock_movements: Product (%) does not belong to business (%)', NEW.product_id, NEW.business_id;
+        END IF;
+    END IF;
+
+    -- 3. Validate sale_id belongs to the exact same business (sale_returns)
+    IF TG_TABLE_NAME = 'sale_returns' AND NEW.sale_id IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.sales
+            WHERE id = NEW.sale_id AND business_id = NEW.business_id
+        ) THEN
+            RAISE EXCEPTION 'Multi-tenant integrity violation on sale_returns: Sale (%) does not belong to business (%)', NEW.sale_id, NEW.business_id;
+        END IF;
+    END IF;
+
+    -- 4. Validate vendor_id belongs to the exact same business
+    IF TG_TABLE_NAME IN ('vendor_purchases', 'vendor_payments', 'vendor_returns') AND NEW.vendor_id IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.vendors
+            WHERE id = NEW.vendor_id AND business_id = NEW.business_id
+        ) THEN
+            RAISE EXCEPTION 'Multi-tenant integrity violation on %: Vendor (%) does not belong to business (%)', TG_TABLE_NAME, NEW.vendor_id, NEW.business_id;
+        END IF;
+    END IF;
+
+    -- 5. Validate purchase_id belongs to the exact same business
+    IF TG_TABLE_NAME IN ('vendor_payments', 'vendor_returns') AND NEW.purchase_id IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.vendor_purchases
+            WHERE id = NEW.purchase_id AND business_id = NEW.business_id
+        ) THEN
+            RAISE EXCEPTION 'Multi-tenant integrity violation on %: Vendor Purchase (%) does not belong to business (%)', TG_TABLE_NAME, NEW.purchase_id, NEW.business_id;
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+-- Attach Immutability & Relational Triggers
+DROP TRIGGER IF EXISTS trg_prevent_business_owner_tampering ON public.businesses;
+CREATE TRIGGER trg_prevent_business_owner_tampering
+BEFORE UPDATE ON public.businesses
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_business_owner_tampering();
+
+DROP TRIGGER IF EXISTS trg_prevent_business_id_products ON public.products;
+CREATE TRIGGER trg_prevent_business_id_products
+BEFORE UPDATE ON public.products
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_business_id_change();
+
+DROP TRIGGER IF EXISTS trg_prevent_business_id_customers ON public.customers;
+CREATE TRIGGER trg_prevent_business_id_customers
+BEFORE UPDATE ON public.customers
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_business_id_change();
+
+DROP TRIGGER IF EXISTS trg_prevent_business_id_sales ON public.sales;
+CREATE TRIGGER trg_prevent_business_id_sales
+BEFORE UPDATE ON public.sales
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_business_id_change();
+
+DROP TRIGGER IF EXISTS trg_prevent_business_id_expenses ON public.expenses;
+CREATE TRIGGER trg_prevent_business_id_expenses
+BEFORE UPDATE ON public.expenses
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_business_id_change();
+
+DROP TRIGGER IF EXISTS trg_prevent_business_id_vendors ON public.vendors;
+CREATE TRIGGER trg_prevent_business_id_vendors
+BEFORE UPDATE ON public.vendors
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_business_id_change();
+
+DROP TRIGGER IF EXISTS trg_prevent_business_id_vendor_purchases ON public.vendor_purchases;
+CREATE TRIGGER trg_prevent_business_id_vendor_purchases
+BEFORE UPDATE ON public.vendor_purchases
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_business_id_change();
+
+DROP TRIGGER IF EXISTS trg_prevent_business_id_vendor_payments ON public.vendor_payments;
+CREATE TRIGGER trg_prevent_business_id_vendor_payments
+BEFORE UPDATE ON public.vendor_payments
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_business_id_change();
+
+DROP TRIGGER IF EXISTS trg_prevent_business_id_sale_returns ON public.sale_returns;
+CREATE TRIGGER trg_prevent_business_id_sale_returns
+BEFORE UPDATE ON public.sale_returns
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_business_id_change();
+
+DROP TRIGGER IF EXISTS trg_prevent_business_id_stock_movements ON public.stock_movements;
+CREATE TRIGGER trg_prevent_business_id_stock_movements
+BEFORE UPDATE ON public.stock_movements
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_business_id_change();
+
+DROP TRIGGER IF EXISTS trg_prevent_business_id_vendor_returns ON public.vendor_returns;
+CREATE TRIGGER trg_prevent_business_id_vendor_returns
+BEFORE UPDATE ON public.vendor_returns
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_business_id_change();
+
+DROP TRIGGER IF EXISTS trg_prevent_business_id_invoices ON public.invoices;
+CREATE TRIGGER trg_prevent_business_id_invoices
+BEFORE UPDATE ON public.invoices
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_business_id_change();
+
+DROP TRIGGER IF EXISTS trg_prevent_business_id_settings ON public.settings;
+CREATE TRIGGER trg_prevent_business_id_settings
+BEFORE UPDATE ON public.settings
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_business_id_change();
+
+DROP TRIGGER IF EXISTS trg_prevent_business_id_subscriptions ON public.subscriptions;
+CREATE TRIGGER trg_prevent_business_id_subscriptions
+BEFORE UPDATE ON public.subscriptions
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_business_id_change();
+
+DROP TRIGGER IF EXISTS trg_prevent_business_id_payments ON public.payments;
+CREATE TRIGGER trg_prevent_business_id_payments
+BEFORE UPDATE ON public.payments
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_business_id_change();
+
+-- Attach Cross-Table Relational Tenant Validation Triggers
+DROP TRIGGER IF EXISTS trg_validate_tenant_sales ON public.sales;
+CREATE TRIGGER trg_validate_tenant_sales
+BEFORE INSERT OR UPDATE ON public.sales
+FOR EACH ROW
+EXECUTE FUNCTION public.validate_tenant_references();
+
+DROP TRIGGER IF EXISTS trg_validate_tenant_sale_returns ON public.sale_returns;
+CREATE TRIGGER trg_validate_tenant_sale_returns
+BEFORE INSERT OR UPDATE ON public.sale_returns
+FOR EACH ROW
+EXECUTE FUNCTION public.validate_tenant_references();
+
+DROP TRIGGER IF EXISTS trg_validate_tenant_stock_movements ON public.stock_movements;
+CREATE TRIGGER trg_validate_tenant_stock_movements
+BEFORE INSERT OR UPDATE ON public.stock_movements
+FOR EACH ROW
+EXECUTE FUNCTION public.validate_tenant_references();
+
+DROP TRIGGER IF EXISTS trg_validate_tenant_vendor_purchases ON public.vendor_purchases;
+CREATE TRIGGER trg_validate_tenant_vendor_purchases
+BEFORE INSERT OR UPDATE ON public.vendor_purchases
+FOR EACH ROW
+EXECUTE FUNCTION public.validate_tenant_references();
+
+DROP TRIGGER IF EXISTS trg_validate_tenant_vendor_payments ON public.vendor_payments;
+CREATE TRIGGER trg_validate_tenant_vendor_payments
+BEFORE INSERT OR UPDATE ON public.vendor_payments
+FOR EACH ROW
+EXECUTE FUNCTION public.validate_tenant_references();
+
+DROP TRIGGER IF EXISTS trg_validate_tenant_vendor_returns ON public.vendor_returns;
+CREATE TRIGGER trg_validate_tenant_vendor_returns
+BEFORE INSERT OR UPDATE ON public.vendor_returns
+FOR EACH ROW
+EXECUTE FUNCTION public.validate_tenant_references();
+
+DROP TRIGGER IF EXISTS trg_validate_tenant_invoices ON public.invoices;
+CREATE TRIGGER trg_validate_tenant_invoices
+BEFORE INSERT OR UPDATE ON public.invoices
+FOR EACH ROW
+EXECUTE FUNCTION public.validate_tenant_references();
 
 -- ==============================================================================
 -- ENABLE ROW LEVEL SECURITY (RLS) ON ALL TABLES
@@ -602,7 +872,7 @@ ALTER TABLE public.payments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.login_activity ENABLE ROW LEVEL SECURITY;
 
 -- ==============================================================================
--- RLS POLICIES
+-- EXPLICIT ROW LEVEL SECURITY POLICIES (SELECT, INSERT, UPDATE, DELETE)
 -- ==============================================================================
 
 -- 1. BUSINESSES POLICIES
@@ -652,158 +922,491 @@ CREATE POLICY "Users can delete own business"
 
 -- 2. PRODUCTS POLICIES
 DROP POLICY IF EXISTS "Users can access own products" ON public.products;
-CREATE POLICY "Users can access own products"
-    ON public.products FOR ALL
+DROP POLICY IF EXISTS "Users can read own products" ON public.products;
+DROP POLICY IF EXISTS "Users can insert own products" ON public.products;
+DROP POLICY IF EXISTS "Users can update own products" ON public.products;
+DROP POLICY IF EXISTS "Users can delete own products" ON public.products;
+
+CREATE POLICY "Users can read own products"
+    ON public.products FOR SELECT
+    TO authenticated
+    USING (public.can_access_business(business_id));
+
+CREATE POLICY "Users can insert own products"
+    ON public.products FOR INSERT
+    TO authenticated
+    WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can update own products"
+    ON public.products FOR UPDATE
     TO authenticated
     USING (public.can_access_business(business_id))
     WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can delete own products"
+    ON public.products FOR DELETE
+    TO authenticated
+    USING (public.can_access_business(business_id));
 
 -- 3. CUSTOMERS POLICIES
 DROP POLICY IF EXISTS "Users can access own customers" ON public.customers;
-CREATE POLICY "Users can access own customers"
-    ON public.customers FOR ALL
+DROP POLICY IF EXISTS "Users can read own customers" ON public.customers;
+DROP POLICY IF EXISTS "Users can insert own customers" ON public.customers;
+DROP POLICY IF EXISTS "Users can update own customers" ON public.customers;
+DROP POLICY IF EXISTS "Users can delete own customers" ON public.customers;
+
+CREATE POLICY "Users can read own customers"
+    ON public.customers FOR SELECT
+    TO authenticated
+    USING (public.can_access_business(business_id));
+
+CREATE POLICY "Users can insert own customers"
+    ON public.customers FOR INSERT
+    TO authenticated
+    WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can update own customers"
+    ON public.customers FOR UPDATE
     TO authenticated
     USING (public.can_access_business(business_id))
     WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can delete own customers"
+    ON public.customers FOR DELETE
+    TO authenticated
+    USING (public.can_access_business(business_id));
 
 -- 4. SALES POLICIES
 DROP POLICY IF EXISTS "Users can access own sales" ON public.sales;
-CREATE POLICY "Users can access own sales"
-    ON public.sales FOR ALL
+DROP POLICY IF EXISTS "Users can read own sales" ON public.sales;
+DROP POLICY IF EXISTS "Users can insert own sales" ON public.sales;
+DROP POLICY IF EXISTS "Users can update own sales" ON public.sales;
+DROP POLICY IF EXISTS "Users can delete own sales" ON public.sales;
+
+CREATE POLICY "Users can read own sales"
+    ON public.sales FOR SELECT
+    TO authenticated
+    USING (public.can_access_business(business_id));
+
+CREATE POLICY "Users can insert own sales"
+    ON public.sales FOR INSERT
+    TO authenticated
+    WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can update own sales"
+    ON public.sales FOR UPDATE
     TO authenticated
     USING (public.can_access_business(business_id))
     WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can delete own sales"
+    ON public.sales FOR DELETE
+    TO authenticated
+    USING (public.can_access_business(business_id));
 
 -- 5. EXPENSES POLICIES
 DROP POLICY IF EXISTS "Users can access own expenses" ON public.expenses;
-CREATE POLICY "Users can access own expenses"
-    ON public.expenses FOR ALL
+DROP POLICY IF EXISTS "Users can read own expenses" ON public.expenses;
+DROP POLICY IF EXISTS "Users can insert own expenses" ON public.expenses;
+DROP POLICY IF EXISTS "Users can update own expenses" ON public.expenses;
+DROP POLICY IF EXISTS "Users can delete own expenses" ON public.expenses;
+
+CREATE POLICY "Users can read own expenses"
+    ON public.expenses FOR SELECT
+    TO authenticated
+    USING (public.can_access_business(business_id));
+
+CREATE POLICY "Users can insert own expenses"
+    ON public.expenses FOR INSERT
+    TO authenticated
+    WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can update own expenses"
+    ON public.expenses FOR UPDATE
     TO authenticated
     USING (public.can_access_business(business_id))
     WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can delete own expenses"
+    ON public.expenses FOR DELETE
+    TO authenticated
+    USING (public.can_access_business(business_id));
 
 -- 6. VENDORS POLICIES
 DROP POLICY IF EXISTS "Users can access own vendors" ON public.vendors;
-CREATE POLICY "Users can access own vendors"
-    ON public.vendors FOR ALL
+DROP POLICY IF EXISTS "Users can read own vendors" ON public.vendors;
+DROP POLICY IF EXISTS "Users can insert own vendors" ON public.vendors;
+DROP POLICY IF EXISTS "Users can update own vendors" ON public.vendors;
+DROP POLICY IF EXISTS "Users can delete own vendors" ON public.vendors;
+
+CREATE POLICY "Users can read own vendors"
+    ON public.vendors FOR SELECT
+    TO authenticated
+    USING (public.can_access_business(business_id));
+
+CREATE POLICY "Users can insert own vendors"
+    ON public.vendors FOR INSERT
+    TO authenticated
+    WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can update own vendors"
+    ON public.vendors FOR UPDATE
     TO authenticated
     USING (public.can_access_business(business_id))
     WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can delete own vendors"
+    ON public.vendors FOR DELETE
+    TO authenticated
+    USING (public.can_access_business(business_id));
 
 -- 7. VENDOR PURCHASES POLICIES
 DROP POLICY IF EXISTS "Users can access own vendor purchases" ON public.vendor_purchases;
-CREATE POLICY "Users can access own vendor purchases"
-    ON public.vendor_purchases FOR ALL
+DROP POLICY IF EXISTS "Users can read own vendor purchases" ON public.vendor_purchases;
+DROP POLICY IF EXISTS "Users can insert own vendor purchases" ON public.vendor_purchases;
+DROP POLICY IF EXISTS "Users can update own vendor purchases" ON public.vendor_purchases;
+DROP POLICY IF EXISTS "Users can delete own vendor purchases" ON public.vendor_purchases;
+
+CREATE POLICY "Users can read own vendor purchases"
+    ON public.vendor_purchases FOR SELECT
+    TO authenticated
+    USING (public.can_access_business(business_id));
+
+CREATE POLICY "Users can insert own vendor purchases"
+    ON public.vendor_purchases FOR INSERT
+    TO authenticated
+    WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can update own vendor purchases"
+    ON public.vendor_purchases FOR UPDATE
     TO authenticated
     USING (public.can_access_business(business_id))
     WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can delete own vendor purchases"
+    ON public.vendor_purchases FOR DELETE
+    TO authenticated
+    USING (public.can_access_business(business_id));
 
 -- 8. VENDOR PAYMENTS POLICIES
 DROP POLICY IF EXISTS "Users can access own vendor payments" ON public.vendor_payments;
-CREATE POLICY "Users can access own vendor payments"
-    ON public.vendor_payments FOR ALL
+DROP POLICY IF EXISTS "Users can read own vendor payments" ON public.vendor_payments;
+DROP POLICY IF EXISTS "Users can insert own vendor payments" ON public.vendor_payments;
+DROP POLICY IF EXISTS "Users can update own vendor payments" ON public.vendor_payments;
+DROP POLICY IF EXISTS "Users can delete own vendor payments" ON public.vendor_payments;
+
+CREATE POLICY "Users can read own vendor payments"
+    ON public.vendor_payments FOR SELECT
+    TO authenticated
+    USING (public.can_access_business(business_id));
+
+CREATE POLICY "Users can insert own vendor payments"
+    ON public.vendor_payments FOR INSERT
+    TO authenticated
+    WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can update own vendor payments"
+    ON public.vendor_payments FOR UPDATE
     TO authenticated
     USING (public.can_access_business(business_id))
     WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can delete own vendor payments"
+    ON public.vendor_payments FOR DELETE
+    TO authenticated
+    USING (public.can_access_business(business_id));
 
 -- 9. SALE RETURNS POLICIES
 DROP POLICY IF EXISTS "Users can access own sale returns" ON public.sale_returns;
-CREATE POLICY "Users can access own sale returns"
-    ON public.sale_returns FOR ALL
+DROP POLICY IF EXISTS "Users can read own sale returns" ON public.sale_returns;
+DROP POLICY IF EXISTS "Users can insert own sale returns" ON public.sale_returns;
+DROP POLICY IF EXISTS "Users can update own sale returns" ON public.sale_returns;
+DROP POLICY IF EXISTS "Users can delete own sale returns" ON public.sale_returns;
+
+CREATE POLICY "Users can read own sale returns"
+    ON public.sale_returns FOR SELECT
+    TO authenticated
+    USING (public.can_access_business(business_id));
+
+CREATE POLICY "Users can insert own sale returns"
+    ON public.sale_returns FOR INSERT
+    TO authenticated
+    WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can update own sale returns"
+    ON public.sale_returns FOR UPDATE
     TO authenticated
     USING (public.can_access_business(business_id))
     WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can delete own sale returns"
+    ON public.sale_returns FOR DELETE
+    TO authenticated
+    USING (public.can_access_business(business_id));
 
 -- 10. STOCK MOVEMENTS POLICIES
 DROP POLICY IF EXISTS "Users can access own stock movements" ON public.stock_movements;
-CREATE POLICY "Users can access own stock movements"
-    ON public.stock_movements FOR ALL
+DROP POLICY IF EXISTS "Users can read own stock movements" ON public.stock_movements;
+DROP POLICY IF EXISTS "Users can insert own stock movements" ON public.stock_movements;
+DROP POLICY IF EXISTS "Users can update own stock movements" ON public.stock_movements;
+DROP POLICY IF EXISTS "Users can delete own stock movements" ON public.stock_movements;
+
+CREATE POLICY "Users can read own stock movements"
+    ON public.stock_movements FOR SELECT
+    TO authenticated
+    USING (public.can_access_business(business_id));
+
+CREATE POLICY "Users can insert own stock movements"
+    ON public.stock_movements FOR INSERT
+    TO authenticated
+    WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can update own stock movements"
+    ON public.stock_movements FOR UPDATE
     TO authenticated
     USING (public.can_access_business(business_id))
     WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can delete own stock movements"
+    ON public.stock_movements FOR DELETE
+    TO authenticated
+    USING (public.can_access_business(business_id));
 
 -- 11. VENDOR RETURNS POLICIES
 DROP POLICY IF EXISTS "Users can access own vendor returns" ON public.vendor_returns;
-CREATE POLICY "Users can access own vendor returns"
-    ON public.vendor_returns FOR ALL
+DROP POLICY IF EXISTS "Users can read own vendor returns" ON public.vendor_returns;
+DROP POLICY IF EXISTS "Users can insert own vendor returns" ON public.vendor_returns;
+DROP POLICY IF EXISTS "Users can update own vendor returns" ON public.vendor_returns;
+DROP POLICY IF EXISTS "Users can delete own vendor returns" ON public.vendor_returns;
+
+CREATE POLICY "Users can read own vendor returns"
+    ON public.vendor_returns FOR SELECT
+    TO authenticated
+    USING (public.can_access_business(business_id));
+
+CREATE POLICY "Users can insert own vendor returns"
+    ON public.vendor_returns FOR INSERT
+    TO authenticated
+    WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can update own vendor returns"
+    ON public.vendor_returns FOR UPDATE
     TO authenticated
     USING (public.can_access_business(business_id))
     WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can delete own vendor returns"
+    ON public.vendor_returns FOR DELETE
+    TO authenticated
+    USING (public.can_access_business(business_id));
 
 -- 12. INVOICES POLICIES
 DROP POLICY IF EXISTS "Users can access own invoices" ON public.invoices;
-CREATE POLICY "Users can access own invoices"
-    ON public.invoices FOR ALL
+DROP POLICY IF EXISTS "Users can read own invoices" ON public.invoices;
+DROP POLICY IF EXISTS "Users can insert own invoices" ON public.invoices;
+DROP POLICY IF EXISTS "Users can update own invoices" ON public.invoices;
+DROP POLICY IF EXISTS "Users can delete own invoices" ON public.invoices;
+
+CREATE POLICY "Users can read own invoices"
+    ON public.invoices FOR SELECT
+    TO authenticated
+    USING (public.can_access_business(business_id));
+
+CREATE POLICY "Users can insert own invoices"
+    ON public.invoices FOR INSERT
+    TO authenticated
+    WITH CHECK (public.can_access_business(business_id));
+
+CREATE POLICY "Users can update own invoices"
+    ON public.invoices FOR UPDATE
     TO authenticated
     USING (public.can_access_business(business_id))
     WITH CHECK (public.can_access_business(business_id));
 
--- 10. SETTINGS POLICIES
-DROP POLICY IF EXISTS "Users can access own settings" ON public.settings;
-CREATE POLICY "Users can access own settings"
-    ON public.settings FOR ALL
+CREATE POLICY "Users can delete own invoices"
+    ON public.invoices FOR DELETE
     TO authenticated
-    USING (
-        (business_id IS NOT NULL AND public.can_access_business(business_id))
-        OR user_id = auth.uid()::text
-        OR public.is_admin()
-    )
-    WITH CHECK (
-        (business_id IS NOT NULL AND public.can_access_business(business_id))
-        OR user_id = auth.uid()::text
-        OR public.is_admin()
-    );
+    USING (public.can_access_business(business_id));
 
--- 11. ADMIN USERS POLICIES
+-- 13. SETTINGS POLICIES (Strictly tenant isolated; no user_id bypass)
+DROP POLICY IF EXISTS "Users can access own settings" ON public.settings;
+DROP POLICY IF EXISTS "Users can read own settings" ON public.settings;
+DROP POLICY IF EXISTS "Users can insert own settings" ON public.settings;
+DROP POLICY IF EXISTS "Users can update own settings" ON public.settings;
+DROP POLICY IF EXISTS "Users can delete own settings" ON public.settings;
+
+CREATE POLICY "Users can read own settings"
+    ON public.settings FOR SELECT
+    TO authenticated
+    USING (business_id IS NOT NULL AND public.can_access_business(business_id));
+
+CREATE POLICY "Users can insert own settings"
+    ON public.settings FOR INSERT
+    TO authenticated
+    WITH CHECK (business_id IS NOT NULL AND public.can_access_business(business_id));
+
+CREATE POLICY "Users can update own settings"
+    ON public.settings FOR UPDATE
+    TO authenticated
+    USING (business_id IS NOT NULL AND public.can_access_business(business_id))
+    WITH CHECK (business_id IS NOT NULL AND public.can_access_business(business_id));
+
+CREATE POLICY "Users can delete own settings"
+    ON public.settings FOR DELETE
+    TO authenticated
+    USING (business_id IS NOT NULL AND public.can_access_business(business_id));
+
+-- 14. ADMIN USERS POLICIES
 DROP POLICY IF EXISTS "Admins can view and manage admin list" ON public.admin_users;
-CREATE POLICY "Admins can view and manage admin list"
-    ON public.admin_users FOR ALL
+DROP POLICY IF EXISTS "Admins can read admin list" ON public.admin_users;
+DROP POLICY IF EXISTS "Admins can insert admin list" ON public.admin_users;
+DROP POLICY IF EXISTS "Admins can update admin list" ON public.admin_users;
+DROP POLICY IF EXISTS "Admins can delete admin list" ON public.admin_users;
+
+CREATE POLICY "Admins can read admin list"
+    ON public.admin_users FOR SELECT
+    TO authenticated
+    USING (public.is_admin());
+
+CREATE POLICY "Admins can insert admin list"
+    ON public.admin_users FOR INSERT
+    TO authenticated
+    WITH CHECK (public.is_admin());
+
+CREATE POLICY "Admins can update admin list"
+    ON public.admin_users FOR UPDATE
     TO authenticated
     USING (public.is_admin())
     WITH CHECK (public.is_admin());
 
--- 12. PROFILES POLICIES
+CREATE POLICY "Admins can delete admin list"
+    ON public.admin_users FOR DELETE
+    TO authenticated
+    USING (public.is_admin());
+
+-- 15. PROFILES POLICIES
 DROP POLICY IF EXISTS "Users can view and edit own profile" ON public.profiles;
-CREATE POLICY "Users can view and edit own profile"
-    ON public.profiles FOR ALL
+DROP POLICY IF EXISTS "Users can read own profile" ON public.profiles;
+DROP POLICY IF EXISTS "Users can insert own profile" ON public.profiles;
+DROP POLICY IF EXISTS "Users can update own profile" ON public.profiles;
+DROP POLICY IF EXISTS "Users can delete own profile" ON public.profiles;
+
+CREATE POLICY "Users can read own profile"
+    ON public.profiles FOR SELECT
+    TO authenticated
+    USING (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "Users can insert own profile"
+    ON public.profiles FOR INSERT
+    TO authenticated
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "Users can update own profile"
+    ON public.profiles FOR UPDATE
     TO authenticated
     USING (user_id = auth.uid()::text OR public.is_admin())
     WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
 
--- 13. SUBSCRIPTIONS POLICIES
+CREATE POLICY "Users can delete own profile"
+    ON public.profiles FOR DELETE
+    TO authenticated
+    USING (public.is_admin());
+
+-- 16. SUBSCRIPTIONS POLICIES
 DROP POLICY IF EXISTS "Users can view own subscriptions" ON public.subscriptions;
+DROP POLICY IF EXISTS "Users can insert subscriptions" ON public.subscriptions;
+DROP POLICY IF EXISTS "Users can update subscriptions" ON public.subscriptions;
+DROP POLICY IF EXISTS "Users can delete subscriptions" ON public.subscriptions;
+
 CREATE POLICY "Users can view own subscriptions"
     ON public.subscriptions FOR SELECT
     TO authenticated
     USING (
         (business_id IS NOT NULL AND public.can_access_business(business_id))
-        OR user_id = auth.uid()::text
         OR public.is_admin()
     );
 
--- 14. PAYMENTS POLICIES
+CREATE POLICY "Users can insert subscriptions"
+    ON public.subscriptions FOR INSERT
+    TO authenticated
+    WITH CHECK (
+        (business_id IS NOT NULL AND public.can_access_business(business_id))
+        OR public.is_admin()
+    );
+
+CREATE POLICY "Users can update subscriptions"
+    ON public.subscriptions FOR UPDATE
+    TO authenticated
+    USING (
+        (business_id IS NOT NULL AND public.can_access_business(business_id))
+        OR public.is_admin()
+    )
+    WITH CHECK (
+        (business_id IS NOT NULL AND public.can_access_business(business_id))
+        OR public.is_admin()
+    );
+
+CREATE POLICY "Users can delete subscriptions"
+    ON public.subscriptions FOR DELETE
+    TO authenticated
+    USING (public.is_admin());
+
+-- 17. PAYMENTS POLICIES
 DROP POLICY IF EXISTS "Users can view own payments" ON public.payments;
+DROP POLICY IF EXISTS "Users can insert payments" ON public.payments;
+DROP POLICY IF EXISTS "Users can update payments" ON public.payments;
+DROP POLICY IF EXISTS "Users can delete payments" ON public.payments;
+
 CREATE POLICY "Users can view own payments"
     ON public.payments FOR SELECT
     TO authenticated
     USING (
         (business_id IS NOT NULL AND public.can_access_business(business_id))
-        OR user_id = auth.uid()::text
         OR public.is_admin()
     );
 
--- 15. LOGIN ACTIVITY POLICIES
+CREATE POLICY "Users can insert payments"
+    ON public.payments FOR INSERT
+    TO authenticated
+    WITH CHECK (public.is_admin());
+
+CREATE POLICY "Users can update payments"
+    ON public.payments FOR UPDATE
+    TO authenticated
+    USING (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+CREATE POLICY "Users can delete payments"
+    ON public.payments FOR DELETE
+    TO authenticated
+    USING (public.is_admin());
+
+-- 18. LOGIN ACTIVITY POLICIES
 DROP POLICY IF EXISTS "Users can view own login activity" ON public.login_activity;
+DROP POLICY IF EXISTS "Allow logging login activity" ON public.login_activity;
+DROP POLICY IF EXISTS "Users can update login activity" ON public.login_activity;
+DROP POLICY IF EXISTS "Users can delete login activity" ON public.login_activity;
+
 CREATE POLICY "Users can view own login activity"
     ON public.login_activity FOR SELECT
     TO authenticated
     USING (user_id = auth.uid()::text OR public.is_admin());
 
-DROP POLICY IF EXISTS "Allow logging login activity" ON public.login_activity;
 CREATE POLICY "Allow logging login activity"
     ON public.login_activity FOR INSERT
     TO authenticated
-    WITH CHECK (user_id = auth.uid()::text OR auth.uid() IS NOT NULL);
+    WITH CHECK (user_id = auth.uid()::text OR public.is_admin());
+
+CREATE POLICY "Users can update login activity"
+    ON public.login_activity FOR UPDATE
+    TO authenticated
+    USING (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+CREATE POLICY "Users can delete login activity"
+    ON public.login_activity FOR DELETE
+    TO authenticated
+    USING (public.is_admin());
 
 -- ==============================================================================
 -- GRANTS & PERMISSIONS

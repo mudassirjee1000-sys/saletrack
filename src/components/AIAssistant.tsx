@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { Product, Sale, Expense, Customer, ShopSettings } from "../types";
+import { getAuthHeaders } from "../lib/supabase";
 import { Sparkles, X, RefreshCw, AlertTriangle, ShieldCheck, CheckCircle, TrendingUp, DollarSign } from "lucide-react";
 
 interface AIAssistantProps {
@@ -84,9 +85,13 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({
     };
 
     try {
+      const authHeaders = await getAuthHeaders();
       const res = await fetch("/api/ai/analyze", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders,
+        },
         body: JSON.stringify({
           metrics,
           promptContext: `Shop: ${settings.shopName}. Currency: ${settings.currency}`,
